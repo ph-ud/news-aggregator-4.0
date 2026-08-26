@@ -9,7 +9,7 @@ This repository is a WebMCP-powered news aggregator for the WebMCP Challenge. Ke
 - `server.mjs` — dependency-free static server and the headers required for local WebMCP testing.
 - `tests/` — unit tests for untrusted agent-supplied article records.
 
-Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; Signal only receives selected, structured article records through `inject-news-to-feed`.
+Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; 4.0-news only receives selected, structured article records through `inject-news-to-feed`.
 
 ## Build, Test, and Development Commands
 
@@ -38,3 +38,7 @@ There is no commit history yet, so use concise imperative subjects such as `Add 
 ## Security & Source Quality
 
 Treat article content and WebMCP tool arguments as untrusted input. Sanitize rendered content, validate URLs, preserve source links and timestamps, and never silently publish a story without showing its provenance. Tool descriptions must state that the app does not fetch or open user-supplied links.
+
+## News Freshness
+
+Search quickly and favor reliable primary reporting from the last 24–48 hours. Verify the original publication time, not the search-index date. Do not include month-old articles; use stories older than seven days only when they provide necessary context. Keep each briefing concise, source-diverse, deduplicated, and responsive to the exact question.

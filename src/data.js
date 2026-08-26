@@ -11,6 +11,7 @@ export function normalizeStories(topic, stories) {
     if (!title || !source || !url || seen.has(url)) return null;
     seen.add(url);
     const published = new Date(story?.publishedAt);
-    return { id: `web-${Date.now()}-${index}`, title, source, url, summary: asText(story?.summary, 420) || `Web research about ${asText(topic, 120)}.`, publishedAt: Number.isNaN(published.getTime()) ? new Date().toISOString() : published.toISOString(), category: asText(story?.category, 60) || 'Web research', addedBy: 'ChatGPT' };
+    const tags = Array.isArray(story?.tags) ? [...new Set(story.tags.map((tag) => asText(tag, 40)).filter(Boolean))].slice(0, 3) : [];
+    return { id: `web-${Date.now()}-${index}`, title, source, url, imageUrl: safeUrl(story?.imageUrl), tags, summary: asText(story?.summary, 420) || `Web research about ${asText(topic, 120)}.`, publishedAt: Number.isNaN(published.getTime()) ? new Date().toISOString() : published.toISOString(), category: asText(story?.category, 60) || 'Web research', addedBy: 'ChatGPT' };
   }).filter(Boolean);
 }

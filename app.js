@@ -1,82 +1,66 @@
 import { normalizeStories } from './src/data.js';
 
-const STORAGE_KEY = 'signal-news-feed-v2';
+const FEED_KEY = '4.0-news-feed-v1';
+const LEGACY_FEED_KEY = 'signal-news-feed-v2';
+const FOLDERS_KEY = '4.0-news-folders-v1';
 const app = document.querySelector('#app');
 const toastRegion = document.querySelector('#toast-region');
-const state = { feed: loadFeed(), activeCategory: 'For you', webmcp: { supported: false, registered: 0 } };
+const state = { feed: load(FEED_KEY, load(LEGACY_FEED_KEY, [])), folders: load(FOLDERS_KEY, []), activeFolder: 'all', newStoryIds: [], webmcp: { supported: false, registered: 0 } };
 let toolsRegistered = false;
 
-function loadFeed() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    return Array.isArray(saved) ? saved : [];
-  } catch { return []; }
-}
-
-function saveFeed() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.feed)); }
+function load(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } }
+function save() { localStorage.setItem(FEED_KEY, JSON.stringify(state.feed)); localStorage.setItem(FOLDERS_KEY, JSON.stringify(state.folders)); }
 function escapeHtml(value = '') { return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]); }
 function safeUrl(value) { try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) ? url.href : '#'; } catch { return '#'; } }
-function formatDate(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? 'Just now' : new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(date); }
-function formatToday() { return new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }).format(new Date()); }
-
-function icon(name) {
-  const icons = {
-    compass: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="m14.8 9.2-1.7 3.9-3.9 1.7 1.7-3.9 3.9-1.7Z"/></svg>',
-    spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2.8 14.1 10l7.1 2-7.1 2.1-2.1 7.1-2-7.1-7.2-2.1 7.2-2L12 2.8Z"/></svg>',
-    globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M3.8 12h16.4M12 3.5c2 2.3 3 5.1 3 8.5s-1 6.2-3 8.5c-2-2.3-3-5.1-3-8.5s1-6.2 3-8.5Z"/></svg>',
-    leaf: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M19.9 4.1C12.2 4.3 6.3 6.3 5 11.4c-.7 2.9 1.7 4.8 4.2 4.1 5-1.4 7-7.3 7.1-7.3"/><path d="M4.1 20c2.4-4 5.4-6.3 9.6-8.4"/></svg>',
-    business: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="7" width="16" height="12" rx="2"/><path d="M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7M4 12h16M10 12v2h4v-2"/></svg>',
-    check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m5 12 4.5 4.5L19 7"/></svg>',
-    arrow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h13M13 6l6 6-6 6"/></svg>',
+function date(value) { const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? 'Today' : new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(parsed); }
+function today() { return new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date()); }
+function keyFor(value) { return String(value).trim().toLocaleLowerCase().replace(/\s+/g, ' ').slice(0, 60); }
+function titleFor(value) { return String(value).trim().replace(/\s+/g, ' ').slice(0, 60); }
+function icon(name) { const icons = { book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4.5 5.5A2.5 2.5 0 0 1 7 3h11.5v16H7a2.5 2.5 0 0 0-2.5 2.5V5.5Z"/><path d="M7 3v16"/><path d="M10 7h5M10 11h5"/></svg>', inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v14H4z"/><path d="M4 14h4l1.5 2h5L16 14h4"/></svg>', folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3.5 6.5h6l1.7 2H20a1 1 0 0 1 1 1V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7.5a1 1 0 0 1 .5-1Z"/></svg>', plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 5v14M5 12h14"/></svg>', sparkle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m12 2.8 1.7 7.5 7.5 1.7-7.5 1.7-1.7 7.5-1.7-7.5-7.5-1.7 7.5-1.7L12 2.8Z"/></svg>', dots: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>', arrow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h13M13 6l6 6-6 6"/></svg>' }; return icons[name] || ''; }
+function ensureFolder(name, curated = true) { const title = titleFor(name); const id = keyFor(title); if (!title || !id) return null; let folder = state.folders.find((entry) => entry.id === id); if (!folder) { folder = { id, name: title, curated, createdAt: new Date().toISOString() }; state.folders.unshift(folder); } return folder; }
+function migrateExistingStories() { state.feed.forEach((story) => { const names = story.tagNames || story.tags || [story.folderName || story.category || 'Reading']; const tags = names.map((name) => ensureFolder(name)).filter(Boolean); story.tagIds = tags.map((tag) => tag.id); story.tagNames = tags.map((tag) => tag.name); story.folderId = story.tagIds[0] || story.folderId; story.folderName = story.tagNames[0] || story.folderName; }); save(); }
+function storiesForFolder() { return state.activeFolder === 'all' ? state.feed : state.feed.filter((story) => (story.tagIds || [story.folderId]).includes(state.activeFolder)); }
+function folderCount(id) { return state.feed.filter((story) => (story.tagIds || [story.folderId]).includes(id)).length; }
+function storyMeta(story) { return `<div class="story-meta"><span>${escapeHtml(story.source)}</span><i></i><span>${date(story.publishedAt)}</span></div>`; }
+function faviconFor(story) { try { return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(new URL(story.url).hostname)}&sz=96`; } catch { return ''; } }
+function storyCard(story, index) { const isNew = state.newStoryIds.includes(story.id); const image = safeUrl(story.imageUrl) || faviconFor(story); const imageType = story.imageUrl ? 'story-photo' : 'story-logo'; const mark = escapeHtml((story.source || '?').trim().charAt(0).toUpperCase()); return `<article class="story-slide ${isNew ? 'story-arriving' : ''}" ${isNew ? `style="--arrival-index:${index}"` : ''}><div class="slide-media ${imageType}"><span class="logo-monogram" aria-hidden="true">${mark}</span><img src="${escapeHtml(image)}" alt="" loading="lazy" onerror="this.remove()" /></div><div class="slide-copy"><p class="story-kicker">${escapeHtml(story.folderName || story.category)}${isNew ? '<span class="new-mark">New</span>' : ''}</p><h3>${escapeHtml(story.title)}</h3><p class="summary">${escapeHtml(story.summary)}</p><footer>${storyMeta(story)}<a href="${escapeHtml(safeUrl(story.url))}" target="_blank" rel="noreferrer" aria-label="Read ${escapeHtml(story.title)}">${icon('arrow')}</a></footer></div></article>`; }
+function emptyFeed() { return `<section class="empty-feed"><span>${icon('sparkle')}</span><p class="eyebrow">Your library is quiet</p><h2>Ask for a subject worth following.</h2><p>4.0-news will let your AI apply useful tags, then place the web-researched stories in your feed.</p><div>Try: “What changed in climate tech this week?”</div></section>`; }
+function folderRow(folder) { const count = folderCount(folder.id); return `<div class="folder-wrap"><button class="folder ${state.activeFolder === folder.id ? 'active' : ''}" data-action="open-folder" data-folder="${escapeHtml(folder.id)}">${icon('folder')}<span># ${escapeHtml(folder.name)}</span><b>${count}</b></button><button class="folder-menu" data-action="rename-folder" data-folder="${escapeHtml(folder.id)}" aria-label="Rename tag ${escapeHtml(folder.name)}">${icon('dots')}</button></div>`; }
+function render() { const stories = storiesForFolder(); const currentFolder = state.folders.find((folder) => folder.id === state.activeFolder); const heading = currentFolder ? currentFolder.name : 'All reading'; const status = state.webmcp.supported ? 'AI desk connected' : 'Connecting AI desk'; app.innerHTML = `<div class="shell"><aside class="sidebar"><a class="brand" href="#" data-action="open-all"><span>4.0</span><strong>news</strong></a><div class="library-title"><span>Library</span><button data-action="new-folder" aria-label="Create folder">${icon('plus')}</button></div><nav class="library" aria-label="Reading folders"><button class="folder ${state.activeFolder === 'all' ? 'active' : ''}" data-action="open-all">${icon('inbox')}<span>All reading</span><b>${state.feed.length}</b></button>${state.folders.map(folderRow).join('')}</nav><div class="sidebar-note"><span class="tiny-spark">${icon('sparkle')}</span><p><strong>AI-curated folders</strong> appear whenever you ask about a new subject.</p></div><div class="reader"><span class="reader-mark">Y</span><div><strong>Your reading room</strong><small>Private & personal</small></div></div></aside><main class="reading-room"><header class="masthead"><span>${today()}</span><span class="desk-status"><i></i>${status}</span></header><section class="intro"><p class="eyebrow">4.0-news / personal edition</p><h1>Read the web<br><em>with a memory.</em></h1><p>Ask your AI to research a subject. It builds a place for that thread and keeps the reporting you want to return to.</p></section><section class="issue-bar"><div><p class="eyebrow">Current shelf</p><h2>${escapeHtml(heading)}</h2></div><span>${stories.length} ${stories.length === 1 ? 'piece' : 'pieces'}</span></section>${stories.length ? `<section class="story-list">${stories.map(storyCard).join('')}</section>` : emptyFeed()}</main><aside class="marginalia"><section><p class="eyebrow">How it works</p><h2>A very small desk.</h2><ol><li>You ask a question.</li><li>Your AI searches the web.</li><li>4.0-news shelves the sources.</li></ol></section><section class="question-card"><p class="eyebrow">Prompt to try</p><blockquote>“Brief me on advances in AI safety.”</blockquote><span>Folders stay yours. Research stays sourced.</span></section><section class="stats"><p><span>Folders</span><b>${state.folders.length}</b></p><p><span>Sources</span><b>${new Set(state.feed.map((story) => story.source)).size}</b></p><p><span>Saved pieces</span><b>${state.feed.length}</b></p></section></aside></div>`; }
+function toast(message) { const element = document.createElement('div'); element.className = 'toast'; element.textContent = message; toastRegion.append(element); setTimeout(() => element.remove(), 2800); }
+function injectNews(topic, stories, mode = 'replace') { const normalized = normalizeStories(topic, stories); if (!normalized.length) throw new Error('No valid stories were supplied. Each story needs a title, source, and https URL.'); const enriched = normalized.map((story) => { const names = story.tags?.length ? story.tags : [story.category || topic]; const tags = names.map((name) => ensureFolder(name, true)).filter(Boolean); return { ...story, tagIds: tags.map((tag) => tag.id), tagNames: tags.map((tag) => tag.name), folderId: tags[0]?.id, folderName: tags[0]?.name }; }); state.feed = mode === 'append' ? [...enriched, ...state.feed.filter((story) => !enriched.some((entry) => entry.url === story.url))] : enriched; state.activeFolder = enriched[0]?.tagIds[0] || 'all'; state.newStoryIds = enriched.map((story) => story.id); save(); render(); setTimeout(() => { state.newStoryIds = []; }, 900); toast(`${enriched.length} new ${enriched.length === 1 ? 'piece' : 'pieces'} tagged and shelved.`); return { topic, tags: [...new Set(enriched.flatMap((story) => story.tagNames))], mode, added: enriched, feedCount: state.feed.length }; }
+async function registerWebMcpTools() { if (!document.modelContext?.registerTool || toolsRegistered) return; toolsRegistered = true; const injectTool = { name: 'inject-news-to-feed', title: 'Add web-researched news to 4.0-news', description: 'Create or update a personal topic folder in 4.0-news with selected web-researched articles. Search fast and favor trustworthy primary reporting published in the last 24–48 hours; a story older than 7 days should only appear when it is essential context, and month-old stories are normally out of scope. Prefer direct source pages, verify publication time, avoid duplicates, and keep the result set concise. Provide imageUrl when a relevant article image is available; otherwise the feed uses the source site favicon. The app never fetches or opens article links.', inputSchema: { type: 'object', properties: { topic: { type: 'string', description: 'The human question or topic. It becomes an AI-curated folder name.' }, mode: { type: 'string', enum: ['replace', 'append'], description: 'Replace this reading view or append new stories.' }, stories: { type: 'array', minItems: 1, maxItems: 10, items: { type: 'object', properties: { title: { type: 'string' }, source: { type: 'string' }, url: { type: 'string' }, imageUrl: { type: 'string', description: 'Optional public article image URL selected during web research.' }, publishedAt: { type: 'string', description: 'ISO date or timestamp. Use the original publication time, not the search-index time.' }, summary: { type: 'string' }, category: { type: 'string' } }, required: ['title', 'source', 'url'], additionalProperties: false } } }, required: ['topic', 'stories'], additionalProperties: false }, annotations: { untrustedContentHint: true }, execute: async ({ topic, stories, mode = 'replace' }) => injectNews(topic, stories, mode) }; const feedTool = { name: 'get-current-feed', title: 'Read the 4.0-news library', description: 'Read the current sourced stories and AI-curated folders. This is read-only.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, untrustedContentHint: true }, execute: async () => ({ stories: state.feed, folders: state.folders, count: state.feed.length }) }; try { await document.modelContext.registerTool(injectTool); await document.modelContext.registerTool(feedTool); state.webmcp = { supported: true, registered: 2 }; render(); } catch (error) { toolsRegistered = false; console.warn('WebMCP registration unavailable:', error); } }
+document.addEventListener('click', (event) => { const button = event.target.closest('[data-action]'); if (!button) return; const { action, folder } = button.dataset; if (action === 'open-all') state.activeFolder = 'all'; if (action === 'open-folder') state.activeFolder = folder; if (action === 'new-folder') { const name = window.prompt('Name this folder'); if (name) { const created = ensureFolder(name, false); state.activeFolder = created.id; save(); toast(`Created ${created.name}.`); } } if (action === 'rename-folder') { const current = state.folders.find((entry) => entry.id === folder); const name = current && window.prompt('Rename this folder', current.name); if (name && current) { current.name = titleFor(name); state.feed.filter((story) => story.folderId === current.id).forEach((story) => { story.folderName = current.name; }); save(); toast('Folder renamed.'); } } render(); });
+migrateExistingStories();
+async function registerTagNewsTool() {
+  if (!document.modelContext?.registerTool) return;
+  const tagTool = {
+    name: 'tag-news-to-feed',
+    title: 'Tag and add fresh news to 4.0-news',
+    description: 'Add fresh web-researched articles and assign up to three precise tags per article. First read the existing tags with get-current-feed. Reuse an existing tag when it has the same meaning; create a new tag only when it is a genuinely different topic, not a synonym, spelling variation, or overly broad label. Prefer reporting from the past 24–48 hours.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        topic: { type: 'string', description: 'The human question being researched.' },
+        mode: { type: 'string', enum: ['replace', 'append'] },
+        stories: {
+          type: 'array', minItems: 1, maxItems: 10,
+          items: {
+            type: 'object', additionalProperties: false,
+            properties: {
+              title: { type: 'string' }, source: { type: 'string' }, url: { type: 'string' }, imageUrl: { type: 'string' }, publishedAt: { type: 'string' }, summary: { type: 'string' }, category: { type: 'string' },
+              tags: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string' }, description: 'Use only specific, distinct tags; reuse an existing tag where equivalent.' }
+            }, required: ['title', 'source', 'url', 'tags']
+          }
+        }
+      }, required: ['topic', 'stories'], additionalProperties: false
+    },
+    annotations: { untrustedContentHint: true },
+    execute: async ({ topic, stories, mode = 'append' }) => injectNews(topic, stories, mode)
   };
-  return icons[name] || '';
+  try { await document.modelContext.registerTool(tagTool); state.webmcp.registered = 3; render(); } catch (error) { console.warn('Tag tool registration unavailable:', error); }
 }
 
-function visibleFeed() { return state.activeCategory === 'For you' ? state.feed : state.feed.filter((story) => story.category === state.activeCategory); }
-function navItems() { return [['For you', 'compass'], ['Tech & AI', 'spark'], ['World', 'globe'], ['Climate', 'leaf'], ['Business', 'business']]; }
-function storyMeta(story) { return `<div class="story-meta"><span class="source-badge">${escapeHtml(story.source)}</span><span>·</span><span>${formatDate(story.publishedAt)}</span></div>`; }
-function storyCard(story) { return `<article class="story-card agent-added"><div><div class="agent-tag">Added by ChatGPT</div><h3>${escapeHtml(story.title)}</h3><p>${escapeHtml(story.summary)}</p></div><div class="story-footer">${storyMeta(story)}<a class="story-action" href="${escapeHtml(safeUrl(story.url))}" target="_blank" rel="noreferrer">Read ${icon('arrow')}</a></div></article>`; }
-
-function emptyFeed() {
-  return `<section class="empty-feed"><span class="empty-orbit" aria-hidden="true">${icon('spark')}</span><p class="eyebrow">Waiting for a question</p><h2>Ask ChatGPT what’s happening.</h2><p>Signal stays deliberately empty until your agent searches the web and brings back reporting worth keeping.</p><div class="prompt-quote">“What changed in fusion energy this week?”</div></section>`;
-}
-
-function render() {
-  const feed = visibleFeed();
-  const [lead, ...rest] = feed;
-  const status = state.webmcp.supported ? `${state.webmcp.registered} tools ready` : 'Opening agent bridge';
-  app.innerHTML = `<div class="shell">
-    <aside class="rail"><div class="brand"><span class="brand-mark">${icon('spark')}</span>signal</div><nav class="nav" aria-label="Sections">${navItems().map(([name, navIcon]) => `<button class="${state.activeCategory === name ? 'active' : ''}" data-action="category" data-category="${name}">${icon(navIcon)}<span>${name}</span></button>`).join('')}</nav><div class="rail-footer"><p class="eyebrow">Your edition</p><div class="profile"><span class="avatar">Y</span><div><strong>You</strong><small>Curious by default</small></div></div></div></aside>
-    <main class="main"><div class="topline"><span class="date">${formatToday()}</span><span class="live-pill"><i class="live-dot"></i> ${status}</span></div><header class="hero"><p class="eyebrow">A calmer news feed</p><h1>A blank page for the <em>right questions.</em></h1><p class="hero-copy">Ask ChatGPT about a subject. It searches the web, weighs the sources, then places the useful reporting here — with provenance intact.</p></header><div class="section-heading"><h2>${state.activeCategory === 'For you' ? 'Your briefing' : state.activeCategory}</h2><span>${feed.length ? `${feed.length} ${feed.length === 1 ? 'story' : 'stories'}` : 'No stories yet'}</span></div>${lead ? `<article class="lead-card"><div class="lead-content"><div class="lead-label"><span></span>Fresh briefing · ${escapeHtml(lead.category)}</div><div class="agent-tag">Added by ChatGPT</div><h3>${escapeHtml(lead.title)}</h3><p>${escapeHtml(lead.summary)}</p>${storyMeta(lead)}</div><div class="lead-art" aria-hidden="true"></div></article><div class="story-grid">${rest.slice(0, 8).map(storyCard).join('')}</div>` : emptyFeed()}</main>
-    <aside class="right-rail"><section class="side-card agent-card"><div class="agent-status"><div><strong>Agent bridge</strong><small>WebMCP is ${state.webmcp.supported ? 'connected' : 'loading'}</small></div><span class="status-check">${icon('check')}</span></div><p>This page does not fetch news. ChatGPT does the research, then uses a page tool to add sourced results.</p><div class="agent-steps"><div class="step"><b>1</b><span>You ask about a subject.</span></div><div class="step"><b>2</b><span>ChatGPT searches the web.</span></div><div class="step"><b>3</b><span>Signal receives the briefing.</span></div></div></section><section class="side-card"><h3>Try a question</h3><div class="topic-list"><span class="topic">AI regulation</span><span class="topic">Fusion energy</span><span class="topic">Climate tech</span><span class="topic">Local elections</span></div></section><section class="side-card"><h3>Feed pulse</h3><div class="mini-stat"><span>Stories in view</span><strong>${feed.length}</strong></div><div class="mini-stat"><span>Web-researched</span><strong>${state.feed.length}</strong></div><div class="mini-stat"><span>Sources</span><strong>${new Set(state.feed.map((story) => story.source)).size}</strong></div></section></aside>
-  </div>`;
-}
-
-function showToast(message) { const toast = document.createElement('div'); toast.className = 'toast'; toast.textContent = message; toastRegion.append(toast); setTimeout(() => toast.remove(), 3300); }
-
-function injectNews(topic, stories, mode = 'replace') {
-  const normalized = normalizeStories(topic, stories);
-  if (!normalized.length) throw new Error('No valid stories were supplied. Each story needs a title, source, and https URL.');
-  state.feed = mode === 'append' ? [...normalized, ...state.feed.filter((story) => !normalized.some((entry) => entry.url === story.url))] : normalized;
-  saveFeed();
-  render();
-  showToast(`${normalized.length} ${normalized.length === 1 ? 'story' : 'stories'} added from web research.`);
-  return { topic, mode, added: normalized, feedCount: state.feed.length };
-}
-
-async function registerWebMcpTools() {
-  if (!document.modelContext?.registerTool || toolsRegistered) return;
-  toolsRegistered = true;
-  const injectTool = {
-    name: 'inject-news-to-feed', title: 'Inject web-researched news into Signal',
-    description: 'Place web-researched articles into the visible Signal feed. The caller must search the web first and supply only selected article records. With mode replace, the current local feed is replaced; append adds new URLs. This tool does not fetch, open, or transmit links.',
-    inputSchema: { type: 'object', properties: { topic: { type: 'string', description: 'The user’s requested subject.' }, mode: { type: 'string', enum: ['replace', 'append'], description: 'Replace the current feed or append new stories.' }, stories: { type: 'array', minItems: 1, maxItems: 10, description: 'Selected web-search results.', items: { type: 'object', properties: { title: { type: 'string' }, source: { type: 'string' }, url: { type: 'string' }, publishedAt: { type: 'string' }, summary: { type: 'string' }, category: { type: 'string' } }, required: ['title', 'source', 'url'], additionalProperties: false } } }, required: ['topic', 'stories'], additionalProperties: false },
-    annotations: { untrustedContentHint: true }, execute: async ({ topic, stories, mode = 'replace' }) => injectNews(topic, stories, mode),
-  };
-  const feedTool = { name: 'get-current-feed', title: 'Read the current Signal feed', description: 'Read the visible Signal article records to avoid duplicates. This is read-only.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, untrustedContentHint: true }, execute: async () => ({ stories: state.feed, count: state.feed.length }) };
-  try { await document.modelContext.registerTool(injectTool); await document.modelContext.registerTool(feedTool); state.webmcp = { supported: true, registered: 2 }; render(); } catch (error) { toolsRegistered = false; console.warn('WebMCP registration unavailable:', error); }
-}
-
-document.addEventListener('click', (event) => { const target = event.target.closest('[data-action="category"]'); if (!target) return; state.activeCategory = target.dataset.category; render(); });
 render();
 registerWebMcpTools();
+registerTagNewsTool();
