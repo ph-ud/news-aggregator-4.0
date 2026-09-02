@@ -1,3 +1,5 @@
+import { randomId } from './crypto.js';
+
 function asText(value, limit) { return typeof value === 'string' ? value.trim().slice(0, limit) : ''; }
 function safeUrl(value) { try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } }
 
@@ -12,7 +14,7 @@ export function normalizeStories(topic, stories) {
     seen.add(url);
     const published = new Date(story?.publishedAt);
     const tags = Array.isArray(story?.tags) ? [...new Set(story.tags.map((tag) => asText(tag, 40)).filter(Boolean))].slice(0, 3) : [];
-    return { id: `web-${Date.now()}-${index}`, title, source, url, imageUrl: safeUrl(story?.imageUrl), tags, summary: asText(story?.summary, 420) || `Web research about ${asText(topic, 120)}.`, publishedAt: Number.isNaN(published.getTime()) ? new Date().toISOString() : published.toISOString(), category: asText(story?.category, 60) || 'Web research', addedBy: 'ChatGPT' };
+    return { id: randomId(), type: 'story', addedAt: new Date(Date.now() + index).toISOString(), title, source, url, imageUrl: safeUrl(story?.imageUrl), tags, summary: asText(story?.summary, 420) || `Web research about ${asText(topic, 120)}.`, publishedAt: Number.isNaN(published.getTime()) ? new Date().toISOString() : published.toISOString(), category: asText(story?.category, 60) || 'Web research', addedBy: 'ChatGPT' };
   }).filter(Boolean);
 }
 
@@ -30,7 +32,7 @@ export function normalizeCreators(topic, creators) {
     seen.add(dedupeKey);
     const kindValue = asText(creator?.kind, 20).toLocaleLowerCase();
     const topics = Array.isArray(creator?.topics) ? [...new Set(creator.topics.map((entry) => asText(entry, 40)).filter(Boolean))].slice(0, 4) : [];
-    return { id: `creator-${dedupeKey.replace(/[^a-z0-9]+/gi, '-').toLocaleLowerCase()}`, name, url, feedUrl: safeUrl(creator?.feedUrl), handle: asText(creator?.handle, 60), kind: CREATOR_KINDS.includes(kindValue) ? kindValue : 'blog', topics: topics.length ? topics : [asText(topic, 40) || 'Discovery'], cadence: asText(creator?.cadence, 60), description: asText(creator?.description, 420) || `An independent ${kindValue || 'blog'} covering ${asText(topic, 120) || 'your interests'}.`, whyRelevant: asText(creator?.whyRelevant, 280), discoveredAt: new Date().toISOString(), discoveredFor: asText(topic, 120), addedBy: 'ChatGPT', rank: index };
+    return { id: randomId(), type: 'creator', host: dedupeKey, addedAt: new Date(Date.now() + index).toISOString(), name, url, feedUrl: safeUrl(creator?.feedUrl), handle: asText(creator?.handle, 60), kind: CREATOR_KINDS.includes(kindValue) ? kindValue : 'blog', topics: topics.length ? topics : [asText(topic, 40) || 'Discovery'], cadence: asText(creator?.cadence, 60), description: asText(creator?.description, 420) || `An independent ${kindValue || 'blog'} covering ${asText(topic, 120) || 'your interests'}.`, whyRelevant: asText(creator?.whyRelevant, 280), discoveredAt: new Date().toISOString(), discoveredFor: asText(topic, 120), addedBy: 'ChatGPT', rank: index };
   }).filter(Boolean);
 }
 

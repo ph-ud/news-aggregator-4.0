@@ -2,19 +2,44 @@
 
 ## Project Structure & Module Organization
 
-This repository is a WebMCP-powered news aggregator for the WebMCP Challenge. Keep the application organized by responsibility:
+This repository is a WebMCP-powered reading library for the WebMCP Challenge. Keep the application organized by responsibility:
 
-- `app.js` — frontend UI, account session, library/discover state, and page-exposed WebMCP tools.
-- `src/account.js` — local account creation, PBKDF2 passphrase hashing and verification, and per-account storage keys.
-- `src/data.js` — normalization, URL validation, deduplication, and source metadata handling for both stories and creators.
-- `server.mjs` — dependency-free static server and the headers required for local WebMCP testing.
-- `tests/` — unit tests for untrusted agent-supplied article records.
+- `app.js` — frontend UI, view state, and page-exposed WebMCP tools.
+- `src/crypto.js` — the end-to-end encryption primitives: key derivation, master-key wrapping, record encryption.
+- `src/store.js` — the encrypted sync client: sign-in, sync, and the decrypted library the UI reads.
+- `src/keystore.js` — persists the unwrapped master key across reloads as a non-extractable `CryptoKey`.
+- `src/data.js` — normalization, URL validation, deduplication, and source metadata for stories and creators.
+- `server/db.mjs` — SQLite schema. `server/auth.mjs` — password and session hashing. `server/api.mjs` — routes. `server/http.mjs` — request helpers.
+- `server.mjs` — static file server plus the `/api` mount.
+- `tests/` — crypto unit tests, API integration tests, and normalization tests for untrusted agent input.
 
 Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; 4.0-reads only receives selected, structured records through `inject-news-to-feed` and `discover-creators`.
 
-## Accounts
+## Accounts and Encryption
 
-Reading data belongs to an account. Accounts are local to the browser: credentials live in `localStorage` under `4.0-reads-accounts-v1`, passphrases are stretched with PBKDF2-SHA-256 (150k iterations, per-account salt) and never stored in the clear, and each account's library is namespaced with `scopedKey(id, 'library')`. Every write path — saving a story, subscribing to a creator, and the WebMCP tools behind them — must call `requireAccount()` first, so an agent cannot fill a shelf that has no owner. `get-account-status` lets an agent check for a session before attempting a write; only the person at the keyboard can sign in.
+Reading data belongs to an account and is end-to-end encrypted. **The server cannot read any of it, and neither can we.**
+
+One passphrase derives two independent secrets client-side, using domain-separated salts:
+
+- `authKey = PBKDF2(passphrase, salt‖"auth", 600k)` is sent to the server, which stores `scrypt(authKey)`. A database dump yields neither the passphrase nor a replayable credential.
+- `kek = PBKDF2(passphrase, salt‖"enc", 600k)` never leaves the browser. It wraps a random 256-bit master key; the server stores only the wrapped blob.
+
+Every library record is encrypted with AES-GCM under the master key, with a fresh IV per write. The master key indirection means changing a passphrase re-wraps one blob instead of re-encrypting the library.
+
+Rules that keep this real rather than nominal:
+
+- **Never derive a record id from its content.** A `creator-<host>` id would leak subscriptions to the server even with the payload encrypted. Use `randomId()`.
+- **The record type lives inside the ciphertext**, not in a column, so a dump cannot separate saved stories from subscriptions.
+- **The server cannot validate content it cannot read.** Normalization stays client-side; the server enforces only structural limits (record size, count, batch size).
+- **What a dump still reveals:** email, display name, record count, ciphertext sizes, and write timestamps. Do not add plaintext columns beyond these without deciding that the leak is acceptable.
+- **A forgotten passphrase cannot be reset.** The recovery key shown once at sign-up is the only fallback, and it is base32 so the written-down form converts back losslessly.
+- E2E in a browser does not defend against a malicious server serving hostile JavaScript. It defends against a leaked database, a stolen backup, and a curious operator.
+
+`tests/api.test.mjs` asserts that a full write leaves no plaintext in the database file or its write-ahead log, with a positive control so the test cannot pass by writing nothing.
+
+## Deployment
+
+The app is no longer a static site: it needs a Node process (≥22.5, for `node:sqlite`) and a persistent disk for the database. Vercel's static/serverless model does not fit — use a host that keeps a filesystem. Set `SESSION_SECRET` in production (the server refuses to start without it) and `DATABASE_PATH` to a persistent location. To move to Postgres, replace `server/db.mjs`; the SQL is deliberately plain.
 
 ## Build, Test, and Development Commands
 

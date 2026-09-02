@@ -1,5 +1,5 @@
 {
-  "name": "signal-news-webmcp",
+  "name": "4.0-reads",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,5 +7,9 @@
     "dev": "node server.mjs",
     "start": "node server.mjs",
     "test": "node --test"
+  },
+  "description": "End-to-end encrypted reading library with WebMCP tools for news and creator discovery.",
+  "engines": {
+    "node": ">=22.5"
   }
 }
