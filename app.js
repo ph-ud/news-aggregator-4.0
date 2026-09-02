@@ -1,6 +1,7 @@
 import { normalizeStories, normalizeCreators } from './src/data.js';
 import { html, raw, SafeHtml } from './src/html.js';
 import { store } from './src/store.js';
+import { createAuthTools } from './src/auth-tools.js';
 import { formatRecoveryKey } from './src/crypto.js';
 
 const app = document.querySelector('#app');
@@ -48,7 +49,13 @@ function icon(name) { const icons = {
 function toast(message) { const element = document.createElement('div'); element.className = 'toast'; element.textContent = message; toastRegion.append(element); setTimeout(() => element.remove(), 2800); }
 
 /* ---------- session ---------- */
-function requireAccount() { if (!store.signedIn) throw new Error('Sign in to 4.0-reads first. Saving stories and subscribing both need an account.'); return store.profile; }
+function requireAccount() {
+  if (!store.signedIn) throw new Error('Sign in to 4.0-reads first. Saving stories and subscribing both need an account.');
+  /* The recovery key is shown exactly once. Anything that repaints while it is up destroys
+     the only fallback for a forgotten passphrase, so nothing may write until it is dismissed. */
+  if (state.view === 'recovery-key' && state.recoveryKey) throw new Error('The reader is still saving the recovery key from their new account. Wait until they have confirmed it.');
+  return store.profile;
+}
 
 async function signUp({ name, email, passphrase }) {
   const { recoveryKey } = await store.signUp({ name, email, passphrase });
@@ -314,15 +321,18 @@ function reportError(error) { toast(error.message); render(); }
 const UNTRUSTED = { untrustedContentHint: true };
 function accountSnapshot() {
   return store.signedIn
-    ? { signedIn: true, account: { name: store.profile.name, email: store.profile.email }, storyCount: library().stories.length, savedCount: library().saved.length, subscriptionCount: library().subscriptions.length, creatorCount: library().creators.length }
-    : { signedIn: false, account: null, storyCount: 0, savedCount: 0, subscriptionCount: 0, creatorCount: 0 };
+    ? { signedIn: true, needsNewPassphrase: store.needsNewPassphrase, account: { name: store.profile.name, email: store.profile.email }, storyCount: library().stories.length, savedCount: library().saved.length, subscriptionCount: library().subscriptions.length, creatorCount: library().creators.length }
+    : { signedIn: false, needsNewPassphrase: false, account: null, storyCount: 0, savedCount: 0, subscriptionCount: 0, creatorCount: 0 };
 }
 
 async function registerWebMcpTools() {
   if (!document.modelContext?.registerTool || toolsRegistered) return;
   toolsRegistered = true;
+  /* Login is a handoff, never a delegation: these tools open the form and wait for the
+     reader. Their arguments carry no passphrase, and they never should. */
+  const authTools = createAuthTools({ store, state, render, snapshot: accountSnapshot, rekeyInFlight: () => rekeyInFlight });
   const tools = [
-    { name: 'get-account-status', title: 'Check the 4.0-reads account', description: 'Report whether a reader is signed in to 4.0-reads and how much is in their library. Call this before saving, subscribing, or adding anything: every write tool fails while signed out, and only the person at the keyboard can sign in, because their passphrase is what decrypts the library.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true }, execute: async () => accountSnapshot() },
+    { name: 'get-account-status', title: 'Check the 4.0-reads account', description: 'Report whether a reader is signed in to 4.0-reads and how much is in their library. Call this before saving, subscribing, or adding anything: every write tool fails while signed out. Only the person at the keyboard can sign in, because their passphrase is what decrypts the library — call start-sign-in to put the form in front of them rather than asking them for credentials.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true }, execute: async () => accountSnapshot() },
 
     { name: 'inject-news-to-feed', title: 'Add web-researched news to 4.0-reads', description: 'Create or update a personal topic shelf with selected web-researched articles. Requires a signed-in account. Search fast and favor trustworthy primary reporting published in the last 24–48 hours; a story older than 7 days should only appear when it is essential context, and month-old stories are normally out of scope. Prefer direct source pages, verify publication time, avoid duplicates, and keep the result set concise. Provide imageUrl when a relevant article image is available; otherwise the shelf uses the source site favicon. Stories arrive unsaved — the reader chooses what to save. The app never fetches or opens article links.', inputSchema: { type: 'object', properties: { topic: { type: 'string' }, mode: { type: 'string', enum: ['replace', 'append'] }, stories: { type: 'array', minItems: 1, maxItems: 10, items: { type: 'object', properties: { title: { type: 'string' }, source: { type: 'string' }, url: { type: 'string' }, imageUrl: { type: 'string' }, publishedAt: { type: 'string' }, summary: { type: 'string' }, category: { type: 'string' } }, required: ['title', 'source', 'url'], additionalProperties: false } } }, required: ['topic', 'stories'], additionalProperties: false }, annotations: UNTRUSTED, execute: async ({ topic, stories, mode = 'replace' }) => injectNews(topic, stories, mode) },
 
@@ -355,6 +365,8 @@ async function registerWebMcpTools() {
       toast(`Unsubscribed from ${result.subscription.name}.`);
       return { subscribed: false, name: result.subscription.name, subscriptionCount: library().subscriptions.length };
     } },
+
+    ...authTools,
   ];
   try { for (const tool of tools) await document.modelContext.registerTool(tool); state.webmcp = { supported: true, registered: tools.length }; render(); }
   catch (error) { toolsRegistered = false; console.warn('WebMCP registration unavailable:', error); }
