@@ -4,12 +4,17 @@
 
 This repository is a WebMCP-powered news aggregator for the WebMCP Challenge. Keep the application organized by responsibility:
 
-- `app.js` — frontend UI, feed state, and page-exposed WebMCP tools.
-- `src/data.js` — normalization, URL validation, deduplication, and source metadata handling.
+- `app.js` — frontend UI, account session, library/discover state, and page-exposed WebMCP tools.
+- `src/account.js` — local account creation, PBKDF2 passphrase hashing and verification, and per-account storage keys.
+- `src/data.js` — normalization, URL validation, deduplication, and source metadata handling for both stories and creators.
 - `server.mjs` — dependency-free static server and the headers required for local WebMCP testing.
 - `tests/` — unit tests for untrusted agent-supplied article records.
 
-Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; 4.0-news only receives selected, structured article records through `inject-news-to-feed`.
+Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; 4.0-reads only receives selected, structured records through `inject-news-to-feed` and `discover-creators`.
+
+## Accounts
+
+Reading data belongs to an account. Accounts are local to the browser: credentials live in `localStorage` under `4.0-reads-accounts-v1`, passphrases are stretched with PBKDF2-SHA-256 (150k iterations, per-account salt) and never stored in the clear, and each account's library is namespaced with `scopedKey(id, 'library')`. Every write path — saving a story, subscribing to a creator, and the WebMCP tools behind them — must call `requireAccount()` first, so an agent cannot fill a shelf that has no owner. `get-account-status` lets an agent check for a session before attempting a write; only the person at the keyboard can sign in.
 
 ## Build, Test, and Development Commands
 
