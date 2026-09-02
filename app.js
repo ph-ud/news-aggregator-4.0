@@ -2,6 +2,7 @@ import { normalizeStories, normalizeCreators } from './src/data.js';
 import { html, raw, SafeHtml } from './src/html.js';
 import { store } from './src/store.js';
 import { createAuthTools } from './src/auth-tools.js';
+import { credentialsAvailable, rememberCredential, savedCredential, forgetSilentAccess } from './src/credentials.js';
 import { formatRecoveryKey } from './src/crypto.js';
 
 const app = document.querySelector('#app');
@@ -14,6 +15,8 @@ const state = {
 };
 let toolsRegistered = false;
 let rekeyInFlight = false;
+/* Whether this browser has a password store to offer. Fixed for the life of the page. */
+const hasPasswordManager = credentialsAvailable();
 
 const library = () => store.library;
 const settings = () => store.library.settings;
@@ -59,6 +62,7 @@ function requireAccount() {
 
 async function signUp({ name, email, passphrase }) {
   const { recoveryKey } = await store.signUp({ name, email, passphrase });
+  await rememberCredential({ email, name, passphrase });
   state.authDraft = { name: '', email: '' };
   state.recoveryKey = recoveryKey;
   state.view = 'recovery-key';
@@ -66,6 +70,8 @@ async function signUp({ name, email, passphrase }) {
 }
 async function signIn({ email, passphrase }) {
   await store.signIn({ email, passphrase });
+  /* Offered after the passphrase is known to work, so the manager never learns a wrong one. */
+  await rememberCredential({ email, name: store.profile.name, passphrase });
   state.authDraft = { name: '', email: '' };
   state.view = 'library';
   registerWebMcpTools();
@@ -78,7 +84,21 @@ async function recoverAccount({ email, recoveryKey }) {
   registerWebMcpTools();
   toast('Recovered. Set a new passphrase from your account menu.');
 }
-async function signOut() { await store.signOut(); state.view = 'library'; state.authMode = 'signin'; state.selectedStoryId = null; state.recoveryKey = ''; render(); }
+/**
+ * Sign in with a credential from the browser's password manager. The chooser is browser UI
+ * the page cannot script, and this runs only from the reader's own click: an agent that can
+ * click buttons must not be able to unlock the library out of the password store.
+ */
+async function signInWithSavedCredential() {
+  const credential = await savedCredential();
+  if (!credential) return false;
+  state.authBusy = true; state.authError = ''; render();
+  try { await signIn(credential); return true; }
+  catch (error) { state.authError = `${error.message} The saved passphrase may be out of date — type it to sign in, and the browser will offer to update it.`; return false; }
+  finally { state.authBusy = false; render(); }
+}
+
+async function signOut() { await store.signOut(); await forgetSilentAccess(); state.view = 'library'; state.authMode = 'signin'; state.selectedStoryId = null; state.recoveryKey = ''; render(); }
 
 /* ---------- library data ---------- */
 async function ensureFolder(name) {
@@ -173,12 +193,13 @@ function authView() {
   return html`<div class="auth-page"><section class="auth-hero"><a class="brand" href="#" data-action="noop"><span>4.0</span><strong>reads</strong></a><p class="eyebrow">News, blogs, and the people behind them</p><h1>Your shelf<br><em>needs a name.</em></h1><p class="auth-lead">An account keeps your saved stories, your shelves, and everyone you subscribe to in one place — encrypted so that only you can read them.</p><ul class="auth-points"><li>${icon('bookmark')}<span><strong>Save</strong> any story to come back to it.</span></li><li>${icon('bell')}<span><strong>Subscribe</strong> to blogs, newsletters, and independent creators.</span></li><li>${icon('lock')}<span><strong>End-to-end encrypted.</strong> The server stores ciphertext it cannot open.</span></li></ul></section>
   <section class="auth-panel"><div class="auth-tabs"><button class="${!isSignUp && !isRecover ? 'active' : ''}" data-action="auth-mode" data-mode="signin">Sign in</button><button class="${isSignUp ? 'active' : ''}" data-action="auth-mode" data-mode="signup">Create account</button></div>
   <form class="auth-form" data-form="auth" novalidate>${isSignUp ? html`<label>Name<input name="name" type="text" autocomplete="name" value="${state.authDraft.name}" placeholder="What should we call you?" /></label>` : ''}
-  <label>Email<input name="email" type="email" autocomplete="email" required value="${state.authDraft.email}" placeholder="you@example.com" /></label>
+  <label>Email<input name="email" type="email" autocomplete="username" required value="${state.authDraft.email}" placeholder="you@example.com" /></label>
   ${isRecover
     ? html`<label>Recovery key<input name="recoveryKey" type="text" required autocomplete="off" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-…" /></label>`
     : html`<label>Passphrase<input name="passphrase" type="password" autocomplete="${isSignUp ? 'new-password' : 'current-password'}" required placeholder="At least 8 characters with a number" /></label>`}
   ${state.authError ? html`<p class="auth-error" role="alert">${state.authError}</p>` : ''}
   <button class="primary-button auth-submit" type="submit" ${state.authBusy ? 'disabled' : ''}>${state.authBusy ? 'Deriving your key…' : submitLabel} ${icon('arrow')}</button></form>
+  ${hasPasswordManager && !isSignUp && !isRecover && html`<p class="auth-note"><button class="link-button" type="button" data-action="use-saved-credential">Use a passphrase saved in this browser</button></p>`}
   ${isRecover
     ? html`<p class="auth-note"><button class="link-button" data-action="auth-mode" data-mode="signin">Back to sign in</button></p>`
     : html`<p class="auth-note"><button class="link-button" data-action="auth-mode" data-mode="recover">Lost your passphrase? Use your recovery key.</button></p>`}
@@ -330,7 +351,7 @@ async function registerWebMcpTools() {
   toolsRegistered = true;
   /* Login is a handoff, never a delegation: these tools open the form and wait for the
      reader. Their arguments carry no passphrase, and they never should. */
-  const authTools = createAuthTools({ store, state, render, snapshot: accountSnapshot, rekeyInFlight: () => rekeyInFlight });
+  const authTools = createAuthTools({ store, state, render, snapshot: accountSnapshot, signOut, rekeyInFlight: () => rekeyInFlight });
   const tools = [
     { name: 'get-account-status', title: 'Check the 4.0-reads account', description: 'Report whether a reader is signed in to 4.0-reads and how much is in their library. Call this before saving, subscribing, or adding anything: every write tool fails while signed out. Only the person at the keyboard can sign in, because their passphrase is what decrypts the library — call start-sign-in to put the form in front of them rather than asking them for credentials.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true }, execute: async () => accountSnapshot() },
 
@@ -407,6 +428,8 @@ document.addEventListener('submit', async (event) => {
     rekeyInFlight = true;
     try {
       await store.changePassphrase({ current, next });
+      /* A stale saved passphrase is worse than none: autofill would quietly stop unlocking. */
+      await rememberCredential({ email: store.profile.email, name: store.profile.name, passphrase: next });
       state.view = 'library';
       render();
       toast('Passphrase changed. Other devices need the new one.');
@@ -469,6 +492,8 @@ document.addEventListener('click', async (event) => {
   /* Leaving mid-re-key would strand the operation with nowhere to report a failure. */
   if (rekeyInFlight && action !== 'copy-recovery') { event.preventDefault(); toast('Finishing your passphrase change first.'); return; }
   if (action === 'auth-mode') { state.authMode = mode; state.authError = ''; render(); return; }
+  /* The chooser is browser UI, and this is the reader's own click — see signInWithSavedCredential. */
+  if (action === 'use-saved-credential') { await signInWithSavedCredential(); return; }
   if (action === 'copy-recovery') { navigator.clipboard?.writeText(formatRecoveryKey(state.recoveryKey)).then(() => toast('Recovery key copied.'), () => toast('Copy failed — write it down instead.')); return; }
   if (action === 'finish-recovery') { state.recoveryKey = ''; state.view = 'library'; toast(`Welcome, ${store.profile.name}.`); render(); return; }
   if (action === 'sign-out') { await signOut(); toast('Signed out. Your library stays encrypted on the server.'); return; }

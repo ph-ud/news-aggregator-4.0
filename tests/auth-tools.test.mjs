@@ -16,13 +16,15 @@ function harness({ signedIn = false, profile = null, needsNewPassphrase = false,
     state: { view, authMode: 'signin', authError: 'stale', authDraft: { name: '', email: '' }, selectedStoryId: 'story-1', recoveryKey },
     store: {
       signedIn, profile, needsNewPassphrase,
-      async signOut() { context.signOuts += 1; this.signedIn = false; this.profile = null; },
+      async signOut() { this.signedIn = false; this.profile = null; },
     },
   };
   context.tools = Object.fromEntries(createAuthTools({
     store: context.store,
     state: context.state,
     render: () => { context.renders += 1; },
+    /* Stands in for the application's sign-out, which the tool must reuse rather than repeat. */
+    signOut: async () => { context.signOuts += 1; await context.store.signOut(); Object.assign(context.state, { view: 'library', authMode: 'signin', selectedStoryId: null, recoveryKey: '' }); },
     snapshot: () => ({ signedIn: context.store.signedIn, account: context.store.profile }),
     rekeyInFlight: () => rekeyInFlight,
     now: () => context.clock,
@@ -95,10 +97,12 @@ test('start-sign-in rejects a mode it does not offer', async () => {
   assert.deepEqual(SIGN_IN_MODES, ['signin', 'signup', 'recover']);
 });
 
-test('sign-out ends the session and clears what the next reader would see', async () => {
+test('sign-out goes through the application\'s own sign-out, not a copy of it', async () => {
   const context = harness({ signedIn: true, profile: { email: 'reader@example.com' } });
   Object.assign(context.state, { view: 'account', authMode: 'recover' });
   const result = await context.tools['sign-out'].execute({});
+  /* A second implementation here is how the tool quietly stops clearing the password
+     manager's silent access, or the key, once the real one grows a step. */
   assert.equal(context.signOuts, 1);
   assert.equal(result.signedOut, true);
   assert.equal(result.signedIn, false);

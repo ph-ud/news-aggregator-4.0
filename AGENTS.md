@@ -10,6 +10,7 @@ This repository is a WebMCP-powered reading library for the WebMCP Challenge. Ke
 - `src/keystore.js` — persists the unwrapped master key across reloads as a non-extractable `CryptoKey`.
 - `src/data.js` — normalization, URL validation, deduplication, and source metadata for stories and creators.
 - `src/auth-tools.js` — the WebMCP login tools, kept out of `app.js` so their shape is testable without a browser.
+- `src/credentials.js` — the browser password manager integration (Credential Management API).
 - `server/db.mjs` — SQLite schema. `server/auth.mjs` — password and session hashing. `server/api.mjs` — routes. `server/http.mjs` — request helpers.
 - `server.mjs` — static file server plus the `/api` mount.
 - `tests/` — crypto unit tests, API integration tests, login-tool tests, and normalization tests for untrusted agent input.
@@ -64,6 +65,39 @@ and wait, and the reader types their own passphrase into the page.
   state and leaves the page alone.
 - Signing out is not undoable from a tool — only the reader's passphrase opens the library again —
   so the description tells the agent to call it when asked, not on its own initiative.
+
+## The Browser's Password Manager
+
+ChatGPT Atlas is Chromium with its own password store, and it imports the reader's existing
+passwords on setup. Agent mode is documented as having no access to saved passwords or autofill.
+That makes the password manager the one component in an agentic browser that can put a passphrase
+into this page without the agent seeing it — so the sign-in is built around it rather than around
+typing. `src/credentials.js` holds the integration.
+
+- **The email field is the username field.** `autocomplete="username"` next to
+  `current-password` (and `new-password` on sign-up) is what makes a Chromium password manager
+  recognize the form at all. `autocomplete="email"` is not a substitute.
+- **Offer the credential after every success — sign-in, sign-up, and re-key.** A saved passphrase
+  that is one re-key out of date is worse than none: autofill would quietly stop unlocking the
+  library, and the reader would blame the app. `navigator.credentials.store()` is what teaches
+  the manager, because a page that never navigates gets no save prompt of its own.
+- **Never retrieve a credential without the reader asking.** Retrieval runs from their click,
+  with `mediation: 'optional'` so the chooser stays browser UI the page cannot script. A silent
+  `get()` on load would hand an unlocked library to anything that can open the page — an agent
+  included — which is precisely the thing the rest of this design refuses to do.
+- **`preventSilentAccess()` on sign-out**, or signing out means nothing on a shared or
+  agent-driven browser. The `sign-out` tool calls the application's own sign-out for this reason:
+  a second implementation is how that step silently goes missing.
+- **Every call is best-effort and must never break a sign-in.** `window.PasswordCredential`
+  existing does not mean a store is reachable — headless and embedded Chromium reject `get()`,
+  `store()`, and `preventSilentAccess()` with `NotSupportedError`. A credential with no password
+  (a federated or passkey entry) is equally a miss. Every failure means one thing: the reader
+  types their passphrase, exactly as before.
+- **What this changes about the threat model:** the passphrase now also lives in the reader's
+  password manager, which their browser vendor may sync. That is their choice and the same
+  posture as every other site they save; it is still not on our server, which is what the
+  end-to-end claim is about. Do not let it drift further — never send the passphrase anywhere,
+  and never put it in a tool result.
 
 ## Changing a Passphrase
 

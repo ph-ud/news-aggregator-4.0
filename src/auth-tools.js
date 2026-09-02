@@ -26,10 +26,13 @@ function clean(value, max) { return String(value ?? '').trim().replace(/\s+/g, '
  * @param {object} deps.state            the UI view state
  * @param {() => void} deps.render       repaint the page
  * @param {() => object} deps.snapshot   the account summary shared with `get-account-status`
+ * @param {() => Promise<void>} deps.signOut  the application's own sign-out, so that the tool
+ *   and the sign-out button cannot drift apart — dropping the key, telling the password
+ *   manager to stop offering silent access, and resetting the view are one path, not two.
  * @param {() => boolean} deps.rekeyInFlight  true while a passphrase change is running
  */
 export function createAuthTools({
-  store, state, render, snapshot,
+  store, state, render, snapshot, signOut,
   rekeyInFlight = () => false,
   sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
   now = () => Date.now(),
@@ -112,12 +115,7 @@ export function createAuthTools({
       execute: async () => {
         refuseDuringRekey();
         if (!store.signedIn && !store.profile) return { ...snapshot(), alreadySignedOut: true };
-        await store.signOut();
-        state.view = 'library';
-        state.authMode = 'signin';
-        state.selectedStoryId = null;
-        state.recoveryKey = '';
-        render();
+        await signOut();
         return { ...snapshot(), signedOut: true, note: 'Signed out. The library is still on the server, encrypted; the reader signs back in with their passphrase.' };
       },
     },
