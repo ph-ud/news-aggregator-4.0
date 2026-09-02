@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeStories, normalizeCreators, addedByLabel, summaryParagraphs, summaryLength } from '../src/data.js';
+import { normalizeStories, normalizeCreators, addedByLabel, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
 
 test('normalizes agent-supplied news while preserving provenance', () => {
   const stories = normalizeStories('fusion energy', [{ title: 'Fusion update', source: 'Example News', url: 'https://example.com/fusion', publishedAt: '2026-08-26T10:00:00Z', summary: 'A concise update.' }]);
@@ -60,4 +60,23 @@ test('measures the summary we hold, not the article we do not', () => {
   assert.equal(summaryLength({ summary: 'Three little words' }), '3 words');
   assert.equal(summaryLength({ summary: 'One' }), '1 word');
   assert.equal(summaryLength({}), 'No summary');
+});
+
+test('keeps a summary long enough to be worth reading, and trims it at a word boundary', () => {
+  /* The summary is all the reader gets, so a few paragraphs must survive intact. */
+  const real = `${'A sentence about the reactor. '.repeat(20)}`.trim();
+  assert.ok(real.length > 420, 'the fixture must exceed the old limit to be meaningful');
+  const [kept] = normalizeStories('t', [{ title: 'T', source: 'S', url: 'https://example.com/a', summary: real }]);
+  assert.equal(kept.summary, real, 'a summary within the limit is stored verbatim');
+
+  const overlong = `${'word '.repeat(400)}tail`;
+  const [trimmed] = normalizeStories('t', [{ title: 'T', source: 'S', url: 'https://example.com/b', summary: overlong }]);
+  assert.ok(trimmed.summary.length <= SUMMARY_LIMIT + 1, 'the ellipsis is the only character allowed past the limit');
+  assert.match(trimmed.summary, /…$/);
+  assert.equal(/\bwor…$/.test(trimmed.summary), false, 'a trim must not cut a word in half');
+});
+
+test('falls back to a placeholder rather than dropping a story with no summary', () => {
+  const [story] = normalizeStories('fusion', [{ title: 'T', source: 'S', url: 'https://example.com/a' }]);
+  assert.equal(story.summary, 'Web research about fusion.');
 });

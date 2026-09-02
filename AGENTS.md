@@ -121,6 +121,16 @@ That makes attribution a correctness requirement, not a courtesy:
 - **Never state a fact about text we do not hold.** The reader page shows the summary's word count; the "12 min read" it used to show was a claim about an article the app has never seen. A test keeps both that string and the old dek from returning.
 - `discover-creators` accepts a `feedUrl` and `src/data.js` validates it, but nothing reads it back. Adding a fetcher would change the threat model this app is built on — article images are already agent-chosen, and `connect-src 'self'` exists so decrypted content cannot leave the page.
 
-## News Freshness
+## Story Quality
+
+### Summary Depth
+
+The summary is not a teaser. The app never fetches the article, so what an assistant writes is the whole of what a reader gets unless they leave for the source — a one-line restatement of the headline gives them a shelf of stories they cannot read.
+
+`inject-news-to-feed` therefore asks for 4–6 sentences (roughly 80–150 words) and marks `summary` required, and `SUMMARY_LIMIT` in `src/data.js` keeps 1200 characters so a full answer survives storage. Keep those two numbers in agreement: advertising a length the normalizer then truncates is worse than asking for less. A test asserts the schema's `maxLength` is the same constant the normalizer enforces.
+
+Normalization stays lenient where the schema is strict — a story that arrives without a summary gets a placeholder rather than being dropped, because a reader is better served by a link they can follow than by silence.
+
+### News Freshness
 
 Search quickly and favor reliable primary reporting from the last 24–48 hours. Verify the original publication time, not the search-index date. Do not include month-old articles; use stories older than seven days only when they provide necessary context. Keep each briefing concise, source-diverse, deduplicated, and responsive to the exact question.

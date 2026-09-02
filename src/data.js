@@ -1,6 +1,22 @@
 import { randomId } from './crypto.js';
 
 function asText(value, limit) { return typeof value === 'string' ? value.trim().slice(0, limit) : ''; }
+
+/**
+ * How much summary we keep. The app never fetches the article, so this text is the whole of
+ * what a reader gets before they follow the link — worth a few paragraphs rather than a teaser.
+ * The tool schema advertises the same number, so what an assistant is asked for is what survives.
+ */
+export const SUMMARY_LIMIT = 1200;
+
+/* Prose is trimmed at a word boundary and marked, so a long summary never ends mid-word. */
+function asProse(value, limit) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit);
+  const boundary = cut.search(/\s+\S*$/);
+  return `${cut.slice(0, boundary > limit * 0.6 ? boundary : limit).trimEnd()}…`;
+}
 function safeUrl(value) { try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } }
 
 export function normalizeStories(topic, stories) {
@@ -14,7 +30,7 @@ export function normalizeStories(topic, stories) {
     seen.add(url);
     const published = new Date(story?.publishedAt);
     const tags = Array.isArray(story?.tags) ? [...new Set(story.tags.map((tag) => asText(tag, 40)).filter(Boolean))].slice(0, 3) : [];
-    return { id: randomId(), type: 'story', addedAt: new Date(Date.now() + index).toISOString(), title, source, url, imageUrl: safeUrl(story?.imageUrl), tags, summary: asText(story?.summary, 420) || `Web research about ${asText(topic, 120)}.`, publishedAt: Number.isNaN(published.getTime()) ? new Date().toISOString() : published.toISOString(), category: asText(story?.category, 60) || 'Web research', addedBy: 'ChatGPT' };
+    return { id: randomId(), type: 'story', addedAt: new Date(Date.now() + index).toISOString(), title, source, url, imageUrl: safeUrl(story?.imageUrl), tags, summary: asProse(story?.summary, SUMMARY_LIMIT) || `Web research about ${asText(topic, 120)}.`, publishedAt: Number.isNaN(published.getTime()) ? new Date().toISOString() : published.toISOString(), category: asText(story?.category, 60) || 'Web research', addedBy: 'ChatGPT' };
   }).filter(Boolean);
 }
 
@@ -32,7 +48,7 @@ export function normalizeCreators(topic, creators) {
     seen.add(dedupeKey);
     const kindValue = asText(creator?.kind, 20).toLocaleLowerCase();
     const topics = Array.isArray(creator?.topics) ? [...new Set(creator.topics.map((entry) => asText(entry, 40)).filter(Boolean))].slice(0, 4) : [];
-    return { id: randomId(), type: 'creator', host: dedupeKey, addedAt: new Date(Date.now() + index).toISOString(), name, url, feedUrl: safeUrl(creator?.feedUrl), handle: asText(creator?.handle, 60), kind: CREATOR_KINDS.includes(kindValue) ? kindValue : 'blog', topics: topics.length ? topics : [asText(topic, 40) || 'Discovery'], cadence: asText(creator?.cadence, 60), description: asText(creator?.description, 420) || `An independent ${kindValue || 'blog'} covering ${asText(topic, 120) || 'your interests'}.`, whyRelevant: asText(creator?.whyRelevant, 280), discoveredAt: new Date().toISOString(), discoveredFor: asText(topic, 120), addedBy: 'ChatGPT', rank: index };
+    return { id: randomId(), type: 'creator', host: dedupeKey, addedAt: new Date(Date.now() + index).toISOString(), name, url, feedUrl: safeUrl(creator?.feedUrl), handle: asText(creator?.handle, 60), kind: CREATOR_KINDS.includes(kindValue) ? kindValue : 'blog', topics: topics.length ? topics : [asText(topic, 40) || 'Discovery'], cadence: asText(creator?.cadence, 60), description: asProse(creator?.description, 420) || `An independent ${kindValue || 'blog'} covering ${asText(topic, 120) || 'your interests'}.`, whyRelevant: asText(creator?.whyRelevant, 280), discoveredAt: new Date().toISOString(), discoveredFor: asText(topic, 120), addedBy: 'ChatGPT', rank: index };
   }).filter(Boolean);
 }
 
@@ -50,13 +66,13 @@ export function addedByLabel(record) { return asText(record?.addedBy, 60) || 'an
 
 /** Paragraphs for the reader page. This is the summary we hold, never the article we do not. */
 export function summaryParagraphs(story) {
-  const summary = asText(story?.summary, 420) || `No summary was supplied for this entry from ${asText(story?.source, 100) || 'its source'}.`;
+  const summary = asProse(story?.summary, SUMMARY_LIMIT) || `No summary was supplied for this entry from ${asText(story?.source, 100) || 'its source'}.`;
   const paragraphs = summary.split(/(?<=[.!?])\s+/).filter(Boolean);
   return paragraphs.length > 1 ? paragraphs : [summary];
 }
 
 /** Length of the summary, so the reader page never advertises a read time for text it lacks. */
 export function summaryLength(story) {
-  const words = (asText(story?.summary, 420).match(/\S+/g) || []).length;
+  const words = (asProse(story?.summary, SUMMARY_LIMIT).match(/\S+/g) || []).length;
   return words ? `${words} ${words === 1 ? 'word' : 'words'}` : 'No summary';
 }

@@ -280,6 +280,12 @@ test('every view showing agent-written text says where that text came from', asy
     assert.match(view(name), /provenanceTag\(/, `${name} renders agent-supplied prose and must attribute it`);
   }
 
+  /* What the tool asks for and what the app stores must be one number, or a fuller summary
+     gets requested and then silently truncated. */
+  assert.match(code, /maxLength: SUMMARY_LIMIT/, 'the schema must advertise the limit the normalizer enforces');
+  assert.match(code, /required: \['title', 'source', 'url', 'summary'\]/, 'a story with no summary has no readable text at all');
+  assert.match(code, /80.150 words/, 'the tool must say how much summary it wants');
+
   /* The reader page is the one that reads like an article, so it must be explicit. */
   assert.match(code, /class="article-notice"/, 'the reader page must state that the body is a summary');
   assert.match(code, /never fetches or stores article text/);
