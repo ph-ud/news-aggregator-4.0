@@ -38,7 +38,29 @@ create table if not exists records (
   deleted    integer not null default 0,
   primary key (user_id, id)
 );
+/* A passkey is a second wrapper around the same master key, opened by a secret the
+   authenticator derives and never discloses. The server keeps the public key so it can
+   check an assertion, and the wrapped key it still cannot open. A dump gains one fact it
+   did not have: that an account has a passkey, and when it was added. */
+create table if not exists passkeys (
+  credential_id text primary key,
+  user_id       text not null references users(id) on delete cascade,
+  public_key    text not null,
+  algorithm     integer not null,
+  sign_count    integer not null default 0,
+  wrapped_mk    text not null,
+  created_at    text not null
+);
+/* Single-use, short-lived, and deleted on use: a challenge is what stops an assertion
+   captured once from being replayed. */
+create table if not exists challenges (
+  challenge  text primary key,
+  purpose    text not null,
+  user_id    text,
+  expires_at text not null
+);
 create index if not exists records_by_update on records(user_id, updated_at);
+create index if not exists passkeys_by_user on passkeys(user_id);
 create index if not exists sessions_by_user on sessions(user_id);
 `;
 

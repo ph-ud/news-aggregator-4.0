@@ -9,9 +9,12 @@ This repository is a WebMCP-powered reading library for the WebMCP Challenge. Ke
 - `src/store.js` — the encrypted sync client: sign-in, sync, and the decrypted library the UI reads.
 - `src/keystore.js` — persists the unwrapped master key across reloads as a non-extractable `CryptoKey`.
 - `src/data.js` — normalization, URL validation, deduplication, and source metadata for stories and creators.
+- `src/auth-tools.js` — the WebMCP login tools, kept out of `app.js` so their shape is testable without a browser.
+- `src/credentials.js` — the browser password manager integration (Credential Management API).
+- `src/passkeys.js` — passkey enrolment and unlock. `server/webauthn.mjs` — assertion verification.
 - `server/db.mjs` — SQLite schema. `server/auth.mjs` — password and session hashing. `server/api.mjs` — routes. `server/http.mjs` — request helpers.
 - `server.mjs` — static file server plus the `/api` mount.
-- `tests/` — crypto unit tests, API integration tests, and normalization tests for untrusted agent input.
+- `tests/` — crypto unit tests, API integration tests, login-tool tests, passkey and WebAuthn verification tests, and normalization tests for untrusted agent input.
 
 Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; 4.0-reads only receives selected, structured records through `inject-news-to-feed` and `discover-creators`.
 
@@ -34,6 +37,104 @@ Rules that keep this real rather than nominal:
 - **What a dump still reveals:** email, display name, record count, ciphertext sizes, and write timestamps. Do not add plaintext columns beyond these without deciding that the leak is acceptable.
 - **A forgotten passphrase cannot be reset.** The recovery key shown once at sign-up is the only fallback, and it is base32 so the written-down form converts back losslessly.
 - **The recovery key derives from its own salt and iteration count**, never from `kdf_salt`. Changing a passphrase rotates `kdf_salt`, so sharing it would silently invalidate the recovery key and lock the reader out permanently the next time they forgot their passphrase. `POST /api/auth/rekey` must leave every `recovery_*` column untouched.
+
+## Login Tools
+
+An agent may *ask* for a sign-in; it must never *perform* one. `start-sign-in` and `sign-out` in
+`src/auth-tools.js` are a handoff: they put the right form in front of the person at the keyboard
+and wait, and the reader types their own passphrase into the page.
+
+- **No login tool may accept a passphrase, a recovery key, or any other credential.** The
+  passphrase derives the key that decrypts the library; routed through a tool call it would be
+  read by a model, written to a transcript, and probably logged — the encryption would be
+  decorative. Every schema sets `additionalProperties: false` so the field cannot be smuggled in
+  anyway, and a test asserts both.
+- **Prefill only what the server already knows.** An email and a display name are in the database
+  in plaintext, so filling them in gives nothing away. They are still agent-supplied strings:
+  trim, cap, and let the `html` template escape them.
+- **Nothing writes while the recovery key is on screen.** It is shown exactly once, and any
+  repaint destroys the only fallback for a forgotten passphrase — so `requireAccount()` refuses
+  every write until the reader has confirmed it, and `start-sign-in` does not hand control back
+  to the agent until then either. A sign-up that returned at `signedIn` would let the agent's
+  very next call take the key off the screen.
+- **`start-sign-in` waits, but not forever.** It polls until the reader finishes and otherwise
+  returns `waiting: true` after three minutes, so an assistant that was called speculatively
+  cannot hang on a form nobody is looking at.
+- **Neither tool runs during a re-key**, for the same reason the UI blocks navigation: the
+  passphrase form is what reports a failure.
+- **Never repaint over the forced-passphrase step.** After a recovery, `start-sign-in` reports the
+  state and leaves the page alone.
+- Signing out is not undoable from a tool — only the reader's passphrase opens the library again —
+  so the description tells the agent to call it when asked, not on its own initiative.
+
+## The Browser's Password Manager
+
+ChatGPT Atlas is Chromium with its own password store, and it imports the reader's existing
+passwords on setup. Agent mode is documented as having no access to saved passwords or autofill.
+That makes the password manager the one component in an agentic browser that can put a passphrase
+into this page without the agent seeing it — so the sign-in is built around it rather than around
+typing. `src/credentials.js` holds the integration.
+
+- **The email field is the username field.** `autocomplete="username"` next to
+  `current-password` (and `new-password` on sign-up) is what makes a Chromium password manager
+  recognize the form at all. `autocomplete="email"` is not a substitute.
+- **Offer the credential after every success — sign-in, sign-up, and re-key.** A saved passphrase
+  that is one re-key out of date is worse than none: autofill would quietly stop unlocking the
+  library, and the reader would blame the app. `navigator.credentials.store()` is what teaches
+  the manager, because a page that never navigates gets no save prompt of its own.
+- **Never retrieve a credential without the reader asking.** Retrieval runs from their click,
+  with `mediation: 'optional'` so the chooser stays browser UI the page cannot script. A silent
+  `get()` on load would hand an unlocked library to anything that can open the page — an agent
+  included — which is precisely the thing the rest of this design refuses to do.
+- **`preventSilentAccess()` on sign-out**, or signing out means nothing on a shared or
+  agent-driven browser. The `sign-out` tool calls the application's own sign-out for this reason:
+  a second implementation is how that step silently goes missing.
+- **Every call is best-effort and must never break a sign-in.** `window.PasswordCredential`
+  existing does not mean a store is reachable — headless and embedded Chromium reject `get()`,
+  `store()`, and `preventSilentAccess()` with `NotSupportedError`. A credential with no password
+  (a federated or passkey entry) is equally a miss. Every failure means one thing: the reader
+  types their passphrase, exactly as before.
+- **What this changes about the threat model:** the passphrase now also lives in the reader's
+  password manager, which their browser vendor may sync. That is their choice and the same
+  posture as every other site they save; it is still not on our server, which is what the
+  end-to-end claim is about. Do not let it drift further — never send the passphrase anywhere,
+  and never put it in a tool result.
+
+## Passkeys
+
+A passkey is the one credential an agentic browser cannot use on the reader's behalf: unlocking
+requires user verification — a fingerprint, a face, a device PIN — and the secret that decrypts
+the library is computed inside the authenticator. The WebAuthn PRF extension is what makes it an
+encryption story rather than only a sign-in one.
+
+- **A passkey is a third wrapper around the same master key**, exactly like the recovery key. It
+  re-encrypts nothing, and enrolling or removing one leaves the library and every other way in
+  untouched. `POST /api/auth/rekey` must keep leaving the `passkeys` table alone.
+- **Enrolling needs the passphrase**, because the raw master key is only obtainable by unwrapping
+  it — after a reload the in-memory key is a non-extractable `CryptoKey`. `store.rawMasterKey()`
+  is that one verified path, shared with the re-key.
+- **The PRF salt is a constant.** PRF already yields a distinct secret per credential, and a
+  per-passkey salt would have to be fetched before the assertion — the exact lookup a
+  discoverable credential exists to avoid. The output is run through HKDF with its own info
+  string, so the same secret used for something else later cannot collide with the wrapping key.
+- **`residentKey: 'required'` and `userVerification: 'required'` are both load-bearing.**
+  Discoverable is what lets the reader unlock without typing an email; verified is the gesture
+  an agent cannot make. The server rejects an assertion whose UV flag is clear, so a relaxed
+  client cannot quietly downgrade it.
+- **No attestation, and therefore no CBOR.** Registration happens inside an authenticated
+  session and asks for `attestation: 'none'`, so the browser's own `getPublicKey()` is the public
+  key of record. Attestation answers "which authenticator model is this", a question this app
+  does not ask, and parsing it would mean a CBOR decoder in the server.
+- **What the server verifies on every assertion**, all of it in `server/webauthn.mjs`: a
+  single-use challenge it issued and deletes on read, the client-data type (a registration
+  signature must not replay as a sign-in), the origin, the RP id hash, the UV flag, the
+  signature, and a counter that must not go backwards. A counter of zero on both sides is normal
+  — many authenticators keep none — and is not treated as a clone.
+- **Behind a proxy, set `ORIGIN`.** The relying party is derived from the `Host` header
+  otherwise, and a deployment that terminates TLS elsewhere cannot trust it. `RP_ID` overrides
+  the id alone.
+- **A failed unlock never leaves a half-open library.** The wrapper is opened client-side, so a
+  server that returns the wrong blob produces a refusal, not a session with no key.
 
 ## Changing a Passphrase
 
@@ -80,7 +181,7 @@ Trusted Types is defence in depth rather than the primary control: with `script-
 
 ## Deployment
 
-The app is no longer a static site: it needs a Node process (≥22.5, for `node:sqlite`) and a persistent disk for the database. Vercel's static/serverless model does not fit — use a host that keeps a filesystem. Set `SESSION_SECRET` in production (the server refuses to start without it) and `DATABASE_PATH` to a persistent location. To move to Postgres, replace `server/db.mjs`; the SQL is deliberately plain.
+The app is no longer a static site: it needs a Node process (≥22.5, for `node:sqlite`) and a persistent disk for the database. Vercel's static/serverless model does not fit — use a host that keeps a filesystem. Set `SESSION_SECRET` in production (the server refuses to start without it), `DATABASE_PATH` to a persistent location, and `ORIGIN` to the site's own origin so passkey verification does not depend on the `Host` header. To move to Postgres, replace `server/db.mjs`; the SQL is deliberately plain.
 
 ## Build, Test, and Development Commands
 

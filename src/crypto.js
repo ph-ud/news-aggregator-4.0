@@ -14,6 +14,7 @@ const KDF_ITERATIONS = 600000;
 const AUTH_CONTEXT = '4.0-reads:auth:v1';
 const ENC_CONTEXT = '4.0-reads:enc:v1';
 const RECOVERY_CONTEXT = '4.0-reads:recovery:v1';
+const PASSKEY_CONTEXT = '4.0-reads:passkey:v1';
 
 const utf8 = (value) => new TextEncoder().encode(value);
 export function toBase64(bytes) { let binary = ''; for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte); return btoa(binary); }
@@ -107,6 +108,34 @@ export async function wrapMasterKey(kek, masterKey) { return wrap(kek, masterKey
 export async function unwrapMasterKey(kek, wrapped) { return unwrap(kek, wrapped); }
 export async function wrapWithRecoveryKey(recoveryKey, masterKey) { return wrap(fromBase32(recoveryKey), masterKey); }
 export async function unwrapWithRecoveryKey(recoveryKey, wrapped) { return unwrap(fromBase32(recoveryKey), wrapped); }
+
+/**
+ * Passkey unlock, built on the WebAuthn PRF extension.
+ *
+ * PRF gives a per-credential secret that the authenticator computes from a salt and never
+ * reveals to anyone but this origin, and only after user verification — a fingerprint or a
+ * device PIN. It is not stored anywhere: not on our server, not in the browser's password
+ * store, not in a tool argument. The reader unlocks with a gesture only a person can make.
+ *
+ * The salt is a constant. PRF already derives a distinct secret per credential, so a
+ * per-passkey salt would add nothing and would have to be fetched before the assertion —
+ * exactly the lookup a discoverable credential exists to avoid.
+ */
+export const PASSKEY_PRF_SALT = utf8(PASSKEY_CONTEXT);
+
+/**
+ * The PRF output is key material, not a key: HKDF gives it a domain of its own, so the same
+ * secret used for a second purpose later cannot collide with the one that wraps the library.
+ */
+async function passkeyKek(prfOutput) {
+  const bytes = new Uint8Array(prfOutput);
+  if (bytes.length < 32) throw new Error('That passkey did not return a usable secret.');
+  const material = await subtle.importKey('raw', bytes, 'HKDF', false, ['deriveBits']);
+  return new Uint8Array(await subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(), info: utf8(PASSKEY_CONTEXT) }, material, 256));
+}
+
+export async function wrapWithPasskey(prfOutput, masterKey) { return wrap(await passkeyKek(prfOutput), masterKey); }
+export async function unwrapWithPasskey(prfOutput, wrapped) { return unwrap(await passkeyKek(prfOutput), wrapped); }
 
 /** Encrypt one record under the master key. A fresh IV per call: never reuse an IV with the same key. */
 export async function encryptRecord(masterKey, record) {
