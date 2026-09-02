@@ -2,14 +2,85 @@
 
 ## Project Structure & Module Organization
 
-This repository is a WebMCP-powered news aggregator for the WebMCP Challenge. Keep the application organized by responsibility:
+This repository is a WebMCP-powered reading library for the WebMCP Challenge. Keep the application organized by responsibility:
 
-- `app.js` — frontend UI, feed state, and page-exposed WebMCP tools.
-- `src/data.js` — normalization, URL validation, deduplication, and source metadata handling.
-- `server.mjs` — dependency-free static server and the headers required for local WebMCP testing.
-- `tests/` — unit tests for untrusted agent-supplied article records.
+- `app.js` — frontend UI, view state, and page-exposed WebMCP tools.
+- `src/crypto.js` — the end-to-end encryption primitives: key derivation, master-key wrapping, record encryption.
+- `src/store.js` — the encrypted sync client: sign-in, sync, and the decrypted library the UI reads.
+- `src/keystore.js` — persists the unwrapped master key across reloads as a non-extractable `CryptoKey`.
+- `src/data.js` — normalization, URL validation, deduplication, and source metadata for stories and creators.
+- `server/db.mjs` — SQLite schema. `server/auth.mjs` — password and session hashing. `server/api.mjs` — routes. `server/http.mjs` — request helpers.
+- `server.mjs` — static file server plus the `/api` mount.
+- `tests/` — crypto unit tests, API integration tests, and normalization tests for untrusted agent input.
 
-Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; 4.0-news only receives selected, structured article records through `inject-news-to-feed`.
+Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; 4.0-reads only receives selected, structured records through `inject-news-to-feed` and `discover-creators`.
+
+## Accounts and Encryption
+
+Reading data belongs to an account and is end-to-end encrypted. **The server cannot read any of it, and neither can we.**
+
+One passphrase derives two independent secrets client-side, using domain-separated salts:
+
+- `authKey = PBKDF2(passphrase, salt‖"auth", 600k)` is sent to the server, which stores `scrypt(authKey)`. A database dump yields neither the passphrase nor a replayable credential.
+- `kek = PBKDF2(passphrase, salt‖"enc", 600k)` never leaves the browser. It wraps a random 256-bit master key; the server stores only the wrapped blob.
+
+Every library record is encrypted with AES-GCM under the master key, with a fresh IV per write. The master key indirection means changing a passphrase re-wraps one blob instead of re-encrypting the library.
+
+Rules that keep this real rather than nominal:
+
+- **Never derive a record id from its content.** A `creator-<host>` id would leak subscriptions to the server even with the payload encrypted. Use `randomId()`.
+- **The record type lives inside the ciphertext**, not in a column, so a dump cannot separate saved stories from subscriptions.
+- **The server cannot validate content it cannot read.** Normalization stays client-side; the server enforces only structural limits (record size, count, batch size).
+- **What a dump still reveals:** email, display name, record count, ciphertext sizes, and write timestamps. Do not add plaintext columns beyond these without deciding that the leak is acceptable.
+- **A forgotten passphrase cannot be reset.** The recovery key shown once at sign-up is the only fallback, and it is base32 so the written-down form converts back losslessly.
+- **The recovery key derives from its own salt and iteration count**, never from `kdf_salt`. Changing a passphrase rotates `kdf_salt`, so sharing it would silently invalidate the recovery key and lock the reader out permanently the next time they forgot their passphrase. `POST /api/auth/rekey` must leave every `recovery_*` column untouched.
+
+## Changing a Passphrase
+
+Changing a passphrase re-wraps the master key; it never re-encrypts the library and never changes the master key, so stored records and the recovery key are both unaffected.
+
+The current passphrase is **required** and is verified by actually unwrapping the master key rather than by asking the server, so a compromised server cannot wave the check through. It is also the only way to obtain the raw key bytes at all: after a reload the in-memory key is a non-extractable `CryptoKey`, deliberately impossible to read back. The single exception is the moment just after recovery, when the raw key is still in hand from the recovery unwrap and there is no current passphrase to give — `store.pendingRaw` holds it for exactly that step, and the UI forces a new passphrase before anything else is reachable.
+
+Two UI rules that are easy to break:
+
+- **Never re-render the passphrase form to show an error.** Passphrases cannot be echoed into HTML attributes, so a re-render clears all three fields and forces the reader to retype everything. `setPassphraseFormState` updates the message in place.
+- **Block navigation while a re-key is in flight.** The form is what reports a failure; if the reader signs out mid-operation, a security-critical change fails with nowhere to report it.
+
+Re-keying deletes every session for the account server-side, so other devices must sign in again with the new passphrase.
+- E2E in a browser does not defend against a malicious server serving hostile JavaScript. It defends against a leaked database, a stolen backup, and a curious operator.
+
+## Content Security Policy
+
+`server.mjs` serves a deny-by-default policy. This is not an anti-operator control — they write the policy — but an anti-XSS one, and XSS is the attack that walks straight through the encryption: the master key is a non-extractable `CryptoKey`, so injected script cannot steal the raw bytes, but it can still use the key to decrypt the library and post the plaintext out. Since the whole UI is built by concatenating agent-supplied text into `innerHTML`, one missed `escapeHtml` is a full compromise, and the policy is the backstop.
+
+- **Never add an inline event handler or inline `<script>`.** `script-src 'self'` blocks both; the image fallback uses a delegated capture-phase `error` listener for this reason. A test asserts no inline handlers creep back in.
+- `style-src` keeps `'unsafe-inline'` for style attributes such as `--reader-scale`; injected CSS is far less dangerous than injected script.
+- `img-src` is wide on purpose: article images are chosen by the agent.
+- `base-uri 'none'` matters more than it looks — without it an injected `<base>` retargets every relative module import.
+- Subresource Integrity was considered and rejected: every script is same-origin so there is no third party to protect against, and `integrity` does not cover a module's static imports, so it would hash `app.js` while leaving `crypto.js` unprotected.
+
+## Trusted Types
+
+`require-trusted-types-for 'script'` makes every `innerHTML` assignment a `TypeError` unless the value comes from a registered policy, and `trusted-types reads-views` allows exactly one policy name so injected script cannot register a permissive one of its own.
+
+The policy is **not** a pass-through. `createHTML(value, source)` verifies that the string was produced by the `html` template in `src/html.js`, which escapes every interpolation by construction. A policy of the shape `createHTML: (s) => s` would satisfy the CSP while protecting nothing; a test asserts ours checks provenance.
+
+Rules for writing views:
+
+- **Build every view with the `html` tagged template**, and return `SafeHtml`. `paint()` is the only sink in the application and rejects anything else.
+- **Never call `escapeHtml` in a view.** The tag already escapes; doing both double-escapes and shows `&amp;lt;` to the reader. A test asserts no view calls it.
+- **A quoted string containing markup will be escaped, not rendered.** This is the easy mistake: `${cond ? '<p>hi</p>' : ''}` renders the tags as text. Use `html\`<p>hi</p>\`` for both branches.
+- **`raw()` is the escape hatch and is only for markup we wrote ourselves** — `icon()` uses it. Never pass it anything derived from a record, a tool argument, or any other agent-supplied value.
+- **`false` serializes to nothing**, so that `${cond && html\`...\`}` works. Boolean attributes therefore need `${String(value)}`, or `aria-pressed` silently becomes `""`.
+- Arrays of `SafeHtml` serialize themselves; no `.join('')` needed.
+
+Trusted Types is defence in depth rather than the primary control: with `script-src 'self'` already blocking inline handlers, injected `<script>`, and `javascript:` URLs, most DOM-XSS paths are shut before this. What it adds is structural — unescaped interpolation becomes impossible to write, and the sink set stays auditable.
+
+`tests/api.test.mjs` asserts that a full write leaves no plaintext in the database file or its write-ahead log, with a positive control so the test cannot pass by writing nothing.
+
+## Deployment
+
+The app is no longer a static site: it needs a Node process (≥22.5, for `node:sqlite`) and a persistent disk for the database. Vercel's static/serverless model does not fit — use a host that keeps a filesystem. Set `SESSION_SECRET` in production (the server refuses to start without it) and `DATABASE_PATH` to a persistent location. To move to Postgres, replace `server/db.mjs`; the SQL is deliberately plain.
 
 ## Build, Test, and Development Commands
 
