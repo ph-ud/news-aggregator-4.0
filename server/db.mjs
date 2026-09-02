@@ -19,6 +19,8 @@ create table if not exists users (
   recovery_wrap  text not null,
   recovery_hash  text not null,
   recovery_salt  text not null,
+  recovery_kdf_salt       text not null,
+  recovery_kdf_iterations integer not null,
   created_at     text not null
 );
 create table if not exists sessions (

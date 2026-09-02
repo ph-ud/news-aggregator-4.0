@@ -18,6 +18,7 @@ async function api(path, { method = 'GET', body } = {}) {
 export const store = {
   profile: null,
   masterKey: null,
+  pendingRaw: null,
   library: emptyLibrary(),
   records: new Map(),
   syncedAt: '',
@@ -27,15 +28,17 @@ export const store = {
   /* ---------- credentials ---------- */
   async signUp({ name, email, passphrase }) {
     const kdfSalt = newSalt();
+    /* Its own salt, so that changing the passphrase later cannot invalidate the recovery key. */
+    const recoveryKdfSalt = newSalt();
     const { authKey, kek } = await deriveKeys(passphrase, kdfSalt);
     const masterKey = newMasterKey();
     const recoveryKey = newRecoveryKey();
     const [wrappedMk, recoveryWrap, recoveryAuthKey] = await Promise.all([
       wrapMasterKey(kek, masterKey),
       wrapWithRecoveryKey(recoveryKey, masterKey),
-      deriveRecoveryAuth(recoveryKey, kdfSalt),
+      deriveRecoveryAuth(recoveryKey, recoveryKdfSalt),
     ]);
-    const { profile } = await api('/api/auth/signup', { method: 'POST', body: { email, name, authKey, kdfSalt, iterations: KDF.iterations, wrappedMk, recoveryWrap, recoveryAuthKey } });
+    const { profile } = await api('/api/auth/signup', { method: 'POST', body: { email, name, authKey, kdfSalt, recoveryKdfSalt, iterations: KDF.iterations, wrappedMk, recoveryWrap, recoveryAuthKey } });
     await this.adopt(profile, masterKey);
     return { recoveryKey };
   },
@@ -51,24 +54,47 @@ export const store = {
   },
 
   async recover({ email, recoveryKey }) {
-    const { salt, iterations } = await api('/api/auth/salt', { method: 'POST', body: { email } });
-    const recoveryAuthKey = await deriveRecoveryAuth(recoveryKey, salt, { iterations });
+    const { recoverySalt, recoveryIterations } = await api('/api/auth/salt', { method: 'POST', body: { email } });
+    const recoveryAuthKey = await deriveRecoveryAuth(recoveryKey, recoverySalt, { iterations: recoveryIterations });
     const { profile, recoveryWrap } = await api('/api/auth/recover', { method: 'POST', body: { email, recoveryAuthKey } });
     const masterKey = await unwrapWithRecoveryKey(recoveryKey, recoveryWrap).catch(() => { throw new Error('That recovery key does not match an account.'); });
     await this.adopt(profile, masterKey);
+    /* Held only until a new passphrase is chosen: the old one is forgotten by definition. */
+    this.pendingRaw = masterKey;
     await this.pull();
   },
 
-  /** Re-wrap the master key under a new passphrase. Nothing stored needs re-encrypting. */
-  async rekey(passphrase) {
-    if (!this.signedIn) throw new Error('Sign in first.');
+  /**
+   * Re-wrap the master key under a new passphrase. The key itself never changes, so nothing
+   * stored needs re-encrypting and the recovery key stays valid.
+   *
+   * The current passphrase is required and is verified by actually unwrapping the master key,
+   * not by asking the server — a compromised server cannot wave this through. It is also the
+   * only way to obtain the raw key bytes at all: after a reload the in-memory key is a
+   * non-extractable CryptoKey, deliberately impossible to read back.
+   *
+   * The exception is the moment just after recovery, when there is no current passphrase to
+   * give and the raw key is still in hand from unwrapping it with the recovery key.
+   */
+  async changePassphrase({ current, next }) {
+    if (!this.profile) throw new Error('Sign in first.');
+    let raw = this.pendingRaw;
+    if (!raw) {
+      if (!current) throw new Error('Enter your current passphrase.');
+      const { wrappedMk, kdfSalt, iterations } = await api('/api/auth/me');
+      const { kek } = await deriveKeys(current, kdfSalt, { iterations });
+      raw = await unwrapMasterKey(kek, wrappedMk).catch(() => { throw new Error('That is not your current passphrase.'); });
+    }
     const kdfSalt = newSalt();
-    const { authKey, kek } = await deriveKeys(passphrase, kdfSalt);
-    const raw = this.rawMasterKey;
-    if (!raw) throw new Error('Re-enter your current passphrase before changing it.');
+    const { authKey, kek } = await deriveKeys(next, kdfSalt);
     const wrappedMk = await wrapMasterKey(kek, raw);
+    /* The server drops every session for this account, so other devices must sign in again. */
     await api('/api/auth/rekey', { method: 'POST', body: { authKey, kdfSalt, iterations: KDF.iterations, wrappedMk } });
+    this.pendingRaw = null;
   },
+
+  /** True only between recovering an account and choosing its new passphrase. */
+  get needsNewPassphrase() { return Boolean(this.pendingRaw); },
 
   async restore() {
     const { signedIn, profile } = await api('/api/auth/me');
@@ -85,13 +111,12 @@ export const store = {
   async signOut() {
     await api('/api/auth/signout', { method: 'POST' }).catch(() => {});
     await forgetKeys();
-    this.profile = null; this.masterKey = null; this.rawMasterKey = null;
+    this.profile = null; this.masterKey = null; this.pendingRaw = null;
     this.library = emptyLibrary(); this.records = new Map(); this.syncedAt = '';
   },
 
   async adopt(profile, rawMasterKey) {
     this.profile = profile;
-    this.rawMasterKey = rawMasterKey;
     this.masterKey = await importMasterKey(rawMasterKey);
     await rememberKey(profile.id, this.masterKey);
   },

@@ -46,17 +46,18 @@ function client() {
 /** Everything the client does before it is allowed to talk to the server. */
 async function enroll(call, email, passphrase, name = 'Reader') {
   const kdfSalt = newSalt();
+  const recoveryKdfSalt = newSalt();
   const { authKey, kek } = await deriveKeys(passphrase, kdfSalt, { iterations: ITERATIONS });
   const masterKey = newMasterKey();
   const recoveryKey = newRecoveryKey();
   const response = await call('/api/auth/signup', { method: 'POST', body: {
-    email, name, authKey, kdfSalt, iterations: ITERATIONS,
+    email, name, authKey, kdfSalt, recoveryKdfSalt, iterations: ITERATIONS,
     wrappedMk: await wrapMasterKey(kek, masterKey),
     recoveryWrap: await wrapWithRecoveryKey(recoveryKey, masterKey),
-    recoveryAuthKey: await deriveRecoveryAuth(recoveryKey, kdfSalt, { iterations: ITERATIONS }),
+    recoveryAuthKey: await deriveRecoveryAuth(recoveryKey, recoveryKdfSalt, { iterations: ITERATIONS }),
   } });
   assert.equal(response.status, 201, `sign-up failed: ${JSON.stringify(response.body)}`);
-  return { response, masterKey, recoveryKey, kdfSalt };
+  return { response, masterKey, recoveryKey, kdfSalt, recoveryKdfSalt };
 }
 
 test('signs up, signs back in, and recovers the same master key', async () => {
@@ -84,6 +85,9 @@ test('rejects a wrong passphrase without revealing whether the account exists', 
   assert.equal(typeof unknown.body.salt, 'string');
   assert.equal(unknown.body.salt.length > 0, true, 'unknown emails must still receive a salt');
   assert.notEqual(known.body.salt, unknown.body.salt);
+  assert.equal(typeof unknown.body.recoverySalt, 'string');
+  assert.ok(unknown.body.recoverySalt.length > 0, 'unknown emails must also receive a decoy recovery salt');
+  assert.deepEqual(Object.keys(known.body).sort(), Object.keys(unknown.body).sort(), 'both responses must have the same shape');
 
   const { authKey } = await deriveKeys('wrongpassphrase1', known.body.salt, { iterations: ITERATIONS });
   const bad = await probe('/api/auth/signin', { method: 'POST', body: { email: 'bo@example.com', authKey } });
@@ -98,7 +102,7 @@ test('a recovery key unwraps the master key when the passphrase is gone', async 
   const { masterKey, recoveryKey } = await enroll(call, 'cleo@example.com', 'reads2026shelf');
   const fresh = client();
   const { body: saltInfo } = await fresh('/api/auth/salt', { method: 'POST', body: { email: 'cleo@example.com' } });
-  const recoveryAuthKey = await deriveRecoveryAuth(recoveryKey, saltInfo.salt, { iterations: saltInfo.iterations });
+  const recoveryAuthKey = await deriveRecoveryAuth(recoveryKey, saltInfo.recoverySalt, { iterations: saltInfo.recoveryIterations });
   const { status, body } = await fresh('/api/auth/recover', { method: 'POST', body: { email: 'cleo@example.com', recoveryAuthKey } });
   assert.equal(status, 200);
   assert.deepEqual([...(await unwrapWithRecoveryKey(recoveryKey, body.recoveryWrap))], [...masterKey]);
@@ -152,6 +156,69 @@ test('the database on disk contains no readable library content', async () => {
   }
   /* The passphrase must not be derivable from anything stored either. */
   assert.equal(dump.includes('reads2026shelf'), false, 'the passphrase must never reach the server');
+});
+
+test('changing a passphrase re-wraps the same key and retires the old one', async () => {
+  const call = client();
+  const { masterKey, recoveryKey } = await enroll(call, 'rekey@example.com', 'reads2026shelf');
+
+  /* Store something first: it must still decrypt afterwards, with no re-upload. */
+  const id = randomId();
+  await call('/api/records', { method: 'POST', body: { records: [{ id, ...(await encryptRecord(masterKey, { type: 'story', title: 'Survives a re-key' })) }] } });
+
+  /* What the client does: unwrap with the old passphrase, re-wrap under the new one. */
+  const { body: before } = await call('/api/auth/me');
+  const { kek: oldKek } = await deriveKeys('reads2026shelf', before.kdfSalt, { iterations: before.iterations });
+  const raw = await unwrapMasterKey(oldKek, before.wrappedMk);
+  const nextSalt = newSalt();
+  const { authKey: nextAuth, kek: nextKek } = await deriveKeys('brandnew2027key', nextSalt, { iterations: ITERATIONS });
+  const rekeyed = await call('/api/auth/rekey', { method: 'POST', body: { authKey: nextAuth, kdfSalt: nextSalt, iterations: ITERATIONS, wrappedMk: await wrapMasterKey(nextKek, raw) } });
+  assert.equal(rekeyed.status, 200);
+
+  const fresh = client();
+  const { body: salt } = await fresh('/api/auth/salt', { method: 'POST', body: { email: 'rekey@example.com' } });
+
+  const { authKey: staleAuth } = await deriveKeys('reads2026shelf', salt.salt, { iterations: salt.iterations });
+  assert.equal((await fresh('/api/auth/signin', { method: 'POST', body: { email: 'rekey@example.com', authKey: staleAuth } })).status, 401, 'the old passphrase must stop working');
+
+  const { authKey, kek } = await deriveKeys('brandnew2027key', salt.salt, { iterations: salt.iterations });
+  const signedIn = await fresh('/api/auth/signin', { method: 'POST', body: { email: 'rekey@example.com', authKey } });
+  assert.equal(signedIn.status, 200, 'the new passphrase must work');
+  assert.deepEqual([...(await unwrapMasterKey(kek, signedIn.body.wrappedMk))], [...masterKey], 'the master key itself must be unchanged');
+
+  const rows = await fresh('/api/records');
+  assert.equal((await decryptRecord(masterKey, rows.body.records.find((row) => row.id === id))).title, 'Survives a re-key', 'stored records must not need re-encrypting');
+
+  /* The recovery key wraps the same master key, so it is untouched by a passphrase change. */
+  const recoveryAuthKey = await deriveRecoveryAuth(recoveryKey, salt.recoverySalt, { iterations: salt.recoveryIterations });
+  const recovered = await fresh('/api/auth/recover', { method: 'POST', body: { email: 'rekey@example.com', recoveryAuthKey } });
+  assert.equal(recovered.status, 200, 'the recovery key must survive a passphrase change');
+});
+
+test('re-keying invalidates sessions on other devices', async () => {
+  const first = client();
+  await enroll(first, 'twodevice@example.com', 'reads2026shelf');
+  const second = client();
+  const { body: salt } = await second('/api/auth/salt', { method: 'POST', body: { email: 'twodevice@example.com' } });
+  const { authKey, kek } = await deriveKeys('reads2026shelf', salt.salt, { iterations: salt.iterations });
+  const signedIn = await second('/api/auth/signin', { method: 'POST', body: { email: 'twodevice@example.com', authKey } });
+  assert.equal((await second('/api/records')).status, 200, 'the second device starts out signed in');
+
+  const raw = await unwrapMasterKey(kek, signedIn.body.wrappedMk);
+  const nextSalt = newSalt();
+  const { authKey: nextAuth, kek: nextKek } = await deriveKeys('brandnew2027key', nextSalt, { iterations: ITERATIONS });
+  await first('/api/auth/rekey', { method: 'POST', body: { authKey: nextAuth, kdfSalt: nextSalt, iterations: ITERATIONS, wrappedMk: await wrapMasterKey(nextKek, raw) } });
+
+  assert.equal((await second('/api/records')).status, 401, 'the other device must be signed out');
+  assert.equal((await first('/api/records')).status, 200, 'the device that changed it stays signed in');
+});
+
+test('rejects a re-key from a caller with no session', async () => {
+  const anonymous = client();
+  const salt = newSalt();
+  const { authKey, kek } = await deriveKeys('brandnew2027key', salt, { iterations: ITERATIONS });
+  const response = await anonymous('/api/auth/rekey', { method: 'POST', body: { authKey, kdfSalt: salt, iterations: ITERATIONS, wrappedMk: await wrapMasterKey(kek, newMasterKey()) } });
+  assert.equal(response.status, 401);
 });
 
 test('serves a content security policy that denies by default', async () => {

@@ -33,6 +33,20 @@ Rules that keep this real rather than nominal:
 - **The server cannot validate content it cannot read.** Normalization stays client-side; the server enforces only structural limits (record size, count, batch size).
 - **What a dump still reveals:** email, display name, record count, ciphertext sizes, and write timestamps. Do not add plaintext columns beyond these without deciding that the leak is acceptable.
 - **A forgotten passphrase cannot be reset.** The recovery key shown once at sign-up is the only fallback, and it is base32 so the written-down form converts back losslessly.
+- **The recovery key derives from its own salt and iteration count**, never from `kdf_salt`. Changing a passphrase rotates `kdf_salt`, so sharing it would silently invalidate the recovery key and lock the reader out permanently the next time they forgot their passphrase. `POST /api/auth/rekey` must leave every `recovery_*` column untouched.
+
+## Changing a Passphrase
+
+Changing a passphrase re-wraps the master key; it never re-encrypts the library and never changes the master key, so stored records and the recovery key are both unaffected.
+
+The current passphrase is **required** and is verified by actually unwrapping the master key rather than by asking the server, so a compromised server cannot wave the check through. It is also the only way to obtain the raw key bytes at all: after a reload the in-memory key is a non-extractable `CryptoKey`, deliberately impossible to read back. The single exception is the moment just after recovery, when the raw key is still in hand from the recovery unwrap and there is no current passphrase to give — `store.pendingRaw` holds it for exactly that step, and the UI forces a new passphrase before anything else is reachable.
+
+Two UI rules that are easy to break:
+
+- **Never re-render the passphrase form to show an error.** Passphrases cannot be echoed into HTML attributes, so a re-render clears all three fields and forces the reader to retype everything. `setPassphraseFormState` updates the message in place.
+- **Block navigation while a re-key is in flight.** The form is what reports a failure; if the reader signs out mid-operation, a security-critical change fails with nowhere to report it.
+
+Re-keying deletes every session for the account server-side, so other devices must sign in again with the new passphrase.
 - E2E in a browser does not defend against a malicious server serving hostile JavaScript. It defends against a leaked database, a stolen backup, and a curious operator.
 
 ## Content Security Policy

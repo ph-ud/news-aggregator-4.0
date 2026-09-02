@@ -38,10 +38,12 @@ const routes = {
     const body = await readJson(request);
     const email = asEmail(body.email);
     if (!email) throw fail(400, 'A valid email is required.');
-    const user = db.prepare('select kdf_salt, kdf_iterations from users where email = ?').get(email);
+    const user = db.prepare('select kdf_salt, kdf_iterations, recovery_kdf_salt, recovery_kdf_iterations from users where email = ?').get(email);
+    /* The recovery key derives from its own salt so that changing a passphrase — which
+       rotates kdf_salt — cannot silently invalidate it. */
     sendJson(response, 200, user
-      ? { salt: user.kdf_salt, iterations: user.kdf_iterations }
-      : { salt: decoySalt(email, serverSecret()), iterations: 600000 });
+      ? { salt: user.kdf_salt, iterations: user.kdf_iterations, recoverySalt: user.recovery_kdf_salt, recoveryIterations: user.recovery_kdf_iterations }
+      : { salt: decoySalt(email, serverSecret()), iterations: 600000, recoverySalt: decoySalt(`recovery:${email}`, serverSecret()), recoveryIterations: 600000 });
   },
 
   'POST /api/auth/signup': async (db, request, response) => {
@@ -52,17 +54,18 @@ const routes = {
     const wrappedMk = asWrapped(body.wrappedMk);
     const recoveryWrap = asWrapped(body.recoveryWrap);
     const recoveryKey = asString(body.recoveryAuthKey, 128);
+    const recoveryKdfSalt = asString(body.recoveryKdfSalt, 64);
     const iterations = Number(body.iterations);
-    if (!email || !authKey || !kdfSalt || !wrappedMk || !recoveryWrap || !recoveryKey) throw fail(400, 'Incomplete sign-up payload.');
+    if (!email || !authKey || !kdfSalt || !wrappedMk || !recoveryWrap || !recoveryKey || !recoveryKdfSalt) throw fail(400, 'Incomplete sign-up payload.');
     if (!Number.isInteger(iterations) || iterations < LIMITS.iterations.min || iterations > LIMITS.iterations.max) throw fail(400, 'Unsupported key-derivation settings.');
     if (db.prepare('select 1 from users where email = ?').get(email)) throw fail(409, 'That email already has an account.');
 
     const auth = hashAuthKey(authKey);
     const recovery = hashAuthKey(recoveryKey);
     const user = { id: randomUUID(), email, name: asString(body.name, 60)?.trim() || email.split('@')[0] };
-    db.prepare(`insert into users (id, email, name, kdf_salt, kdf_iterations, auth_hash, auth_salt, wrapped_mk, recovery_wrap, recovery_hash, recovery_salt, created_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(user.id, user.email, user.name, kdfSalt, iterations, auth.hash, auth.salt, wrappedMk, recoveryWrap, recovery.hash, recovery.salt, new Date().toISOString());
+    db.prepare(`insert into users (id, email, name, kdf_salt, kdf_iterations, auth_hash, auth_salt, wrapped_mk, recovery_wrap, recovery_hash, recovery_salt, recovery_kdf_salt, recovery_kdf_iterations, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(user.id, user.email, user.name, kdfSalt, iterations, auth.hash, auth.salt, wrappedMk, recoveryWrap, recovery.hash, recovery.salt, recoveryKdfSalt, iterations, new Date().toISOString());
     sendJson(response, 201, { profile: user, wrappedMk: JSON.parse(wrappedMk) }, startSession(db, response, user.id));
   },
 
@@ -95,6 +98,8 @@ const routes = {
 
   /* Re-key after recovery or a deliberate change. The master key never changes, so
      nothing needs re-encrypting — only its wrapper does. */
+  /* Deliberately leaves every recovery_* column alone: the recovery key wraps the same
+     master key and must keep working across a passphrase change. */
   'POST /api/auth/rekey': async (db, request, response, user) => {
     if (!user) throw fail(401, 'Sign in first.');
     const body = await readJson(request);

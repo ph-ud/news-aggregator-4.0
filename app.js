@@ -11,6 +11,7 @@ const state = {
   recoveryKey: '', booting: true, webmcp: { supported: false, registered: 0 },
 };
 let toolsRegistered = false;
+let rekeyInFlight = false;
 
 const library = () => store.library;
 const settings = () => store.library.settings;
@@ -187,7 +188,30 @@ function recoveryKeyView() {
   <p class="auth-note">We cannot show this again, and we cannot email it to you: it is not stored anywhere in a form we can read.</p></section></div>`;
 }
 
-function accountChip() { const name = store.profile?.name || 'Reader'; return `<div class="account-chip"><span class="reader-mark">${escapeHtml(initials(name))}</span><div><strong>${escapeHtml(name)}</strong><small>${escapeHtml(store.profile?.email || '')}</small></div><button data-action="sign-out" aria-label="Sign out">${icon('logout')}</button></div>`; }
+function passphraseForm({ needsCurrent = true } = {}) {
+  return `<form class="auth-form passphrase-form" data-form="passphrase" novalidate>
+  ${needsCurrent ? '<label>Current passphrase<input name="current" type="password" autocomplete="current-password" required placeholder="The one you use today" /></label>' : ''}
+  <label>New passphrase<input name="next" type="password" autocomplete="new-password" required placeholder="At least 8 characters with a number" /></label>
+  <label>Confirm new passphrase<input name="confirm" type="password" autocomplete="new-password" required placeholder="Type it again" /></label>
+  <p class="auth-error" role="alert" data-role="passphrase-error" hidden></p>
+  <button class="primary-button auth-submit" type="submit"><span data-role="label">Change passphrase</span> ${icon('arrow')}</button></form>`;
+}
+
+/** Forced immediately after recovery: the old passphrase is forgotten, so one must be set. */
+function setPassphraseView() {
+  return `<div class="auth-page"><section class="auth-hero"><a class="brand" href="#" data-action="noop"><span>4.0</span><strong>reads</strong></a><p class="eyebrow">Almost there</p><h1>Choose a new<br><em>passphrase.</em></h1><p class="auth-lead">Your library is unlocked, but only for as long as this page stays open — the passphrase you forgot still cannot open it. Set a new one now and your shelf is reachable again from any device.</p><p class="auth-lead">Your recovery key does not change and stays valid.</p></section>
+  <section class="auth-panel"><p class="side-label">New passphrase</p>${passphraseForm({ needsCurrent: false })}<p class="auth-note">This re-wraps the key your library is already encrypted with. Nothing is re-encrypted, and nothing is re-uploaded.</p></section></div>`;
+}
+
+function accountView() {
+  return `<div class="shell">${sidebar()}<main class="library-main"><header class="topbar"><span>${today()}</span><span class="page-count">Account</span></header>
+  <section class="library-hero"><p class="eyebrow">Account</p><h1>Your keys,<br><em>your shelf.</em></h1><p>${escapeHtml(store.profile.name)} · ${escapeHtml(store.profile.email)}</p></section>
+  <section class="account-grid"><div class="account-block"><p class="eyebrow">Change passphrase</p><h2>Set a new passphrase</h2><p class="account-copy">Your passphrase never reaches the server. Changing it re-wraps the key your library is already encrypted with, so nothing has to be re-encrypted or re-uploaded — and your recovery key keeps working.</p>${passphraseForm()}</div>
+  <div class="account-block account-facts"><p class="eyebrow">What this does</p><ul class="account-list"><li>${icon('lock')}<span>Derives a new key from the new passphrase and re-wraps the same master key.</span></li><li>${icon('bell')}<span>Signs you out everywhere else. Other devices need the new passphrase to return.</span></li><li>${icon('bookmark')}<span>Leaves your ${library().stories.length} ${library().stories.length === 1 ? 'story' : 'stories'} and ${library().subscriptions.length} ${library().subscriptions.length === 1 ? 'subscription' : 'subscriptions'} untouched.</span></li></ul><p class="account-copy">If you forget the new passphrase, your recovery key is still the only way back. We cannot reset it for you.</p></div></section></main>
+  <aside class="library-aside"><div class="aside-block aside-note"><span>${icon('lock')}</span><p>The server stores your library as ciphertext it cannot open, and only ever sees a value derived from your passphrase — never the passphrase itself.</p></div></aside></div>`;
+}
+
+function accountChip() { const name = store.profile?.name || 'Reader'; return `<div class="account-chip"><span class="reader-mark">${escapeHtml(initials(name))}</span><button class="account-identity" data-action="open-account" aria-label="Account settings"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(store.profile?.email || '')}</small></button><button data-action="sign-out" aria-label="Sign out">${icon('logout')}</button></div>`; }
 function folderRow(folder) { return `<div class="folder-wrap"><button class="folder ${state.activeFolder === folder.id && state.view === 'library' ? 'active' : ''}" data-action="open-folder" data-folder="${escapeHtml(folder.id)}">${icon('folder')}<span>${escapeHtml(folder.name)}</span><b>${folderCount(folder.id)}</b></button><button class="folder-menu" data-action="rename-folder" data-folder="${escapeHtml(folder.id)}" aria-label="Rename ${escapeHtml(folder.name)}">${icon('dots')}</button></div>`; }
 function sidebar() { const { stories: feed, saved, folders, subscriptions } = library(); const libraryActive = state.view === 'library'; return `<aside class="sidebar"><a class="brand" href="#" data-action="open-all"><span>4.0</span><strong>reads</strong></a>
   <nav class="primary-nav" aria-label="Sections"><button class="nav-link ${libraryActive ? 'active' : ''}" data-action="open-all">${icon('book')}<span>Library</span></button><button class="nav-link ${state.view === 'discover' ? 'active' : ''}" data-action="open-discover">${icon('compass')}<span>Discover</span><b>${library().creators.length || ''}</b></button></nav>
@@ -246,6 +270,8 @@ function readerView(story) {
 function render() {
   if (state.booting) { app.innerHTML = '<div class="auth-page boot-page"><p class="eyebrow">Unlocking your library…</p></div>'; return; }
   if (state.view === 'recovery-key' && state.recoveryKey) { app.innerHTML = recoveryKeyView(); return; }
+  /* Recovered but no passphrase yet: nothing else is reachable until one is chosen. */
+  if (store.needsNewPassphrase) { app.innerHTML = setPassphraseView(); return; }
   if (!store.signedIn) {
     app.innerHTML = authView();
     const field = app.querySelector('input[name="name"], input[name="email"]');
@@ -255,6 +281,7 @@ function render() {
   const story = library().stories.find((entry) => entry.id === state.selectedStoryId);
   if (state.view === 'reader' && story) app.innerHTML = readerView(story);
   else if (state.view === 'discover') app.innerHTML = discoverView();
+  else if (state.view === 'account') app.innerHTML = accountView();
   else { state.view = 'library'; app.innerHTML = libraryView(); }
 }
 
@@ -310,8 +337,50 @@ async function registerWebMcpTools() {
   catch (error) { toolsRegistered = false; console.warn('WebMCP registration unavailable:', error); }
 }
 
+/* Updates the form in place. A re-render would clear the fields the reader just typed. */
+function setPassphraseFormState(form, { error = '', busy = false } = {}) {
+  const message = form.querySelector('[data-role="passphrase-error"]');
+  message.textContent = error;
+  message.hidden = !error;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = busy;
+  button.querySelector('[data-role="label"]').textContent = busy ? 'Re-wrapping your key…' : 'Change passphrase';
+}
+
+function validatePassphraseChange({ current, next, confirm, needsCurrent }) {
+  if (needsCurrent && !current) return 'Enter your current passphrase.';
+  if (next.length < 8 || !/[a-zA-Z]/.test(next) || !/[0-9]/.test(next)) return 'Use at least 8 characters, mixing letters and numbers.';
+  if (next !== confirm) return 'The two new passphrases do not match.';
+  if (needsCurrent && next === current) return 'That is already your passphrase.';
+  return '';
+}
+
 /* ---------- events ---------- */
 document.addEventListener('submit', async (event) => {
+  const passphraseFormElement = event.target.closest('[data-form="passphrase"]');
+  if (passphraseFormElement) {
+    event.preventDefault();
+    const button = passphraseFormElement.querySelector('button[type="submit"]');
+    if (button.disabled) return;
+    const fields = new FormData(passphraseFormElement);
+    const current = String(fields.get('current') || '');
+    const next = String(fields.get('next') || '');
+    const confirm = String(fields.get('confirm') || '');
+    const problem = validatePassphraseChange({ current, next, confirm, needsCurrent: !store.needsNewPassphrase });
+    if (problem) { setPassphraseFormState(passphraseFormElement, { error: problem }); return; }
+    setPassphraseFormState(passphraseFormElement, { busy: true });
+    rekeyInFlight = true;
+    try {
+      await store.changePassphrase({ current, next });
+      state.view = 'library';
+      render();
+      toast('Passphrase changed. Other devices need the new one.');
+    } catch (error) {
+      setPassphraseFormState(passphraseFormElement, { error: error.message });
+    } finally { rekeyInFlight = false; }
+    return;
+  }
+
   const form = event.target.closest('[data-form="auth"]');
   if (!form) return;
   event.preventDefault();
@@ -362,6 +431,8 @@ document.addEventListener('click', async (event) => {
   if (action === 'noop') { event.preventDefault(); return; }
   /* Owned by the change listener; re-rendering here would clear the checkbox. */
   if (action === 'confirm-recovery') return;
+  /* Leaving mid-re-key would strand the operation with nowhere to report a failure. */
+  if (rekeyInFlight && action !== 'copy-recovery') { event.preventDefault(); toast('Finishing your passphrase change first.'); return; }
   if (action === 'auth-mode') { state.authMode = mode; state.authError = ''; render(); return; }
   if (action === 'copy-recovery') { navigator.clipboard?.writeText(formatRecoveryKey(state.recoveryKey)).then(() => toast('Recovery key copied.'), () => toast('Copy failed — write it down instead.')); return; }
   if (action === 'finish-recovery') { state.recoveryKey = ''; state.view = 'library'; toast(`Welcome, ${store.profile.name}.`); render(); return; }
@@ -370,6 +441,7 @@ document.addEventListener('click', async (event) => {
   if (action === 'open-all') { event.preventDefault(); state.activeFolder = 'all'; state.view = 'library'; }
   if (action === 'open-saved') { state.activeFolder = 'saved'; state.view = 'library'; }
   if (action === 'open-discover') { state.view = 'discover'; }
+  if (action === 'open-account') { state.view = 'account'; }
   if (action === 'open-folder') { state.activeFolder = folder; state.view = 'library'; }
   if (action === 'open-reader') { state.selectedStoryId = story; state.view = 'reader'; window.scrollTo({ top: 0, behavior: 'smooth' }); }
   if (action === 'back-to-library') { state.view = 'library'; state.selectedStoryId = null; }
