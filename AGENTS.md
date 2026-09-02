@@ -11,9 +11,10 @@ This repository is a WebMCP-powered reading library for the WebMCP Challenge. Ke
 - `src/data.js` — normalization, URL validation, deduplication, and source metadata for stories and creators.
 - `src/auth-tools.js` — the WebMCP login tools, kept out of `app.js` so their shape is testable without a browser.
 - `src/credentials.js` — the browser password manager integration (Credential Management API).
+- `src/passkeys.js` — passkey enrolment and unlock. `server/webauthn.mjs` — assertion verification.
 - `server/db.mjs` — SQLite schema. `server/auth.mjs` — password and session hashing. `server/api.mjs` — routes. `server/http.mjs` — request helpers.
 - `server.mjs` — static file server plus the `/api` mount.
-- `tests/` — crypto unit tests, API integration tests, login-tool tests, and normalization tests for untrusted agent input.
+- `tests/` — crypto unit tests, API integration tests, login-tool tests, passkey and WebAuthn verification tests, and normalization tests for untrusted agent input.
 
 Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; 4.0-reads only receives selected, structured records through `inject-news-to-feed` and `discover-creators`.
 
@@ -99,6 +100,42 @@ typing. `src/credentials.js` holds the integration.
   end-to-end claim is about. Do not let it drift further — never send the passphrase anywhere,
   and never put it in a tool result.
 
+## Passkeys
+
+A passkey is the one credential an agentic browser cannot use on the reader's behalf: unlocking
+requires user verification — a fingerprint, a face, a device PIN — and the secret that decrypts
+the library is computed inside the authenticator. The WebAuthn PRF extension is what makes it an
+encryption story rather than only a sign-in one.
+
+- **A passkey is a third wrapper around the same master key**, exactly like the recovery key. It
+  re-encrypts nothing, and enrolling or removing one leaves the library and every other way in
+  untouched. `POST /api/auth/rekey` must keep leaving the `passkeys` table alone.
+- **Enrolling needs the passphrase**, because the raw master key is only obtainable by unwrapping
+  it — after a reload the in-memory key is a non-extractable `CryptoKey`. `store.rawMasterKey()`
+  is that one verified path, shared with the re-key.
+- **The PRF salt is a constant.** PRF already yields a distinct secret per credential, and a
+  per-passkey salt would have to be fetched before the assertion — the exact lookup a
+  discoverable credential exists to avoid. The output is run through HKDF with its own info
+  string, so the same secret used for something else later cannot collide with the wrapping key.
+- **`residentKey: 'required'` and `userVerification: 'required'` are both load-bearing.**
+  Discoverable is what lets the reader unlock without typing an email; verified is the gesture
+  an agent cannot make. The server rejects an assertion whose UV flag is clear, so a relaxed
+  client cannot quietly downgrade it.
+- **No attestation, and therefore no CBOR.** Registration happens inside an authenticated
+  session and asks for `attestation: 'none'`, so the browser's own `getPublicKey()` is the public
+  key of record. Attestation answers "which authenticator model is this", a question this app
+  does not ask, and parsing it would mean a CBOR decoder in the server.
+- **What the server verifies on every assertion**, all of it in `server/webauthn.mjs`: a
+  single-use challenge it issued and deletes on read, the client-data type (a registration
+  signature must not replay as a sign-in), the origin, the RP id hash, the UV flag, the
+  signature, and a counter that must not go backwards. A counter of zero on both sides is normal
+  — many authenticators keep none — and is not treated as a clone.
+- **Behind a proxy, set `ORIGIN`.** The relying party is derived from the `Host` header
+  otherwise, and a deployment that terminates TLS elsewhere cannot trust it. `RP_ID` overrides
+  the id alone.
+- **A failed unlock never leaves a half-open library.** The wrapper is opened client-side, so a
+  server that returns the wrong blob produces a refusal, not a session with no key.
+
 ## Changing a Passphrase
 
 Changing a passphrase re-wraps the master key; it never re-encrypts the library and never changes the master key, so stored records and the recovery key are both unaffected.
@@ -144,7 +181,7 @@ Trusted Types is defence in depth rather than the primary control: with `script-
 
 ## Deployment
 
-The app is no longer a static site: it needs a Node process (≥22.5, for `node:sqlite`) and a persistent disk for the database. Vercel's static/serverless model does not fit — use a host that keeps a filesystem. Set `SESSION_SECRET` in production (the server refuses to start without it) and `DATABASE_PATH` to a persistent location. To move to Postgres, replace `server/db.mjs`; the SQL is deliberately plain.
+The app is no longer a static site: it needs a Node process (≥22.5, for `node:sqlite`) and a persistent disk for the database. Vercel's static/serverless model does not fit — use a host that keeps a filesystem. Set `SESSION_SECRET` in production (the server refuses to start without it), `DATABASE_PATH` to a persistent location, and `ORIGIN` to the site's own origin so passkey verification does not depend on the `Host` header. To move to Postgres, replace `server/db.mjs`; the SQL is deliberately plain.
 
 ## Build, Test, and Development Commands
 

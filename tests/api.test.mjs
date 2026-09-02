@@ -249,7 +249,7 @@ test('serves a content security policy that denies by default', async () => {
 
 test('the served markup carries no inline event handlers', async () => {
   /* An inline handler would be dead code under this policy, so it must not creep back in. */
-  const scripts = await Promise.all(['/app.js', '/src/store.js', '/src/crypto.js'].map(async (path) => (await fetch(base + path)).text()));
+  const scripts = await Promise.all(['/app.js', '/src/store.js', '/src/crypto.js', '/src/credentials.js', '/src/passkeys.js', '/src/auth-tools.js'].map(async (path) => (await fetch(base + path)).text()));
   for (const source of scripts) assert.equal(/\son[a-z]+\s*=\s*["']/.test(source), false, 'markup built in JS must not contain inline handlers');
 });
 

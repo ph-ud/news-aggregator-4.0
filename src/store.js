@@ -1,4 +1,5 @@
 import { normalizeRecoveryKey, deriveKeys, deriveRecoveryAuth, newSalt, newMasterKey, newRecoveryKey, wrapMasterKey, unwrapMasterKey, wrapWithRecoveryKey, unwrapWithRecoveryKey, importMasterKey, encryptRecord, decryptRecord, randomId, KDF } from './crypto.js';
+import { enrollPasskey, unlockWithPasskey } from './passkeys.js';
 import { rememberKey, recallKey, forgetKeys } from './keystore.js';
 
 const TYPES = { story: 'stories', creator: 'creators', subscription: 'subscriptions', folder: 'folders', saved: 'saved' };
@@ -22,6 +23,7 @@ export const store = {
   library: emptyLibrary(),
   records: new Map(),
   syncedAt: '',
+  passkeys: [],
 
   get signedIn() { return Boolean(this.profile && this.masterKey); },
 
@@ -50,6 +52,7 @@ export const store = {
     /* A decoy salt gets this far and fails here: the server cannot tell us the passphrase was wrong. */
     const masterKey = await unwrapMasterKey(kek, wrappedMk).catch(() => { throw new Error('Those credentials do not match an account.'); });
     await this.adopt(profile, masterKey);
+    await this.loadPasskeys();
     await this.pull();
   },
 
@@ -78,13 +81,7 @@ export const store = {
    */
   async changePassphrase({ current, next }) {
     if (!this.profile) throw new Error('Sign in first.');
-    let raw = this.pendingRaw;
-    if (!raw) {
-      if (!current) throw new Error('Enter your current passphrase.');
-      const { wrappedMk, kdfSalt, iterations } = await api('/api/auth/me');
-      const { kek } = await deriveKeys(current, kdfSalt, { iterations });
-      raw = await unwrapMasterKey(kek, wrappedMk).catch(() => { throw new Error('That is not your current passphrase.'); });
-    }
+    const raw = await this.rawMasterKey(current);
     const kdfSalt = newSalt();
     const { authKey, kek } = await deriveKeys(next, kdfSalt);
     const wrappedMk = await wrapMasterKey(kek, raw);
@@ -93,17 +90,62 @@ export const store = {
     this.pendingRaw = null;
   },
 
+  /**
+   * The raw master key bytes, which only the passphrase can produce: after a reload the
+   * in-memory key is a non-extractable CryptoKey. Verified by actually unwrapping, never by
+   * asking the server, so a compromised server cannot wave the check through. Both things
+   * that add a wrapper — a re-key and enrolling a passkey — go through here.
+   */
+  async rawMasterKey(current) {
+    if (this.pendingRaw) return this.pendingRaw;
+    if (!current) throw new Error('Enter your current passphrase.');
+    const { wrappedMk, kdfSalt, iterations } = await api('/api/auth/me');
+    const { kek } = await deriveKeys(current, kdfSalt, { iterations });
+    return unwrapMasterKey(kek, wrappedMk).catch(() => { throw new Error('That is not your current passphrase.'); });
+  },
+
+  /* ---------- passkeys ---------- */
+
+  /** Adds one more wrapper around the same master key. Nothing is re-encrypted. */
+  async addPasskey({ current }) {
+    if (!this.profile) throw new Error('Sign in first.');
+    const { passkeys } = await enrollPasskey({ api, rawMasterKey: await this.rawMasterKey(current) });
+    this.passkeys = passkeys || [];
+    return this.passkeys;
+  },
+
+  async signInWithPasskey() {
+    const { profile, masterKey } = await unlockWithPasskey({ api });
+    await this.adopt(profile, masterKey);
+    await this.loadPasskeys();
+    await this.pull();
+  },
+
+  async removePasskey(credentialId) {
+    const { passkeys } = await api('/api/auth/passkey/remove', { method: 'POST', body: { credentialId } });
+    this.passkeys = passkeys || [];
+    return this.passkeys;
+  },
+
+  async loadPasskeys() {
+    const { passkeys } = await api('/api/auth/me').catch(() => ({}));
+    this.passkeys = passkeys || [];
+    return this.passkeys;
+  },
+
   /** True only between recovering an account and choosing its new passphrase. */
   get needsNewPassphrase() { return Boolean(this.pendingRaw); },
 
   async restore() {
-    const { signedIn, profile } = await api('/api/auth/me');
+    const payload = await api('/api/auth/me');
+    const { signedIn, profile } = payload;
     if (!signedIn) return false;
     const key = await recallKey(profile.id);
     /* Cookie alive but key gone (new device, cleared storage): the passphrase is the only way back in. */
     if (!key) { this.profile = profile; return false; }
     this.profile = profile;
     this.masterKey = key;
+    this.passkeys = payload.passkeys || [];
     await this.pull();
     return true;
   },
@@ -111,7 +153,7 @@ export const store = {
   async signOut() {
     await api('/api/auth/signout', { method: 'POST' }).catch(() => {});
     await forgetKeys();
-    this.profile = null; this.masterKey = null; this.pendingRaw = null;
+    this.profile = null; this.masterKey = null; this.pendingRaw = null; this.passkeys = [];
     this.library = emptyLibrary(); this.records = new Map(); this.syncedAt = '';
   },
 

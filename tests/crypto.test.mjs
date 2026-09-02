@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveKeys, deriveRecoveryAuth, newSalt, newMasterKey, newRecoveryKey, wrapMasterKey, unwrapMasterKey, wrapWithRecoveryKey, unwrapWithRecoveryKey, encryptRecord, decryptRecord, randomId, formatRecoveryKey, toBase64 } from '../src/crypto.js';
+import { deriveKeys, deriveRecoveryAuth, newSalt, newMasterKey, newRecoveryKey, wrapMasterKey, unwrapMasterKey, wrapWithRecoveryKey, unwrapWithRecoveryKey, wrapWithPasskey, unwrapWithPasskey, encryptRecord, decryptRecord, randomId, formatRecoveryKey, toBase64, randomBytes } from '../src/crypto.js';
 
 const ITERATIONS = 10000;
 const derive = (pass, salt) => deriveKeys(pass, salt, { iterations: ITERATIONS });
@@ -71,4 +71,20 @@ test('a recovery key survives being written down and typed back in', async () =>
   const wrapped = await wrapWithRecoveryKey(key, masterKey);
   assert.deepEqual([...(await unwrapWithRecoveryKey(formatted, wrapped))], [...masterKey], 'the dashed form the reader copies must unwrap the key');
   assert.deepEqual([...(await unwrapWithRecoveryKey(formatted.toLowerCase(), wrapped))], [...masterKey], 'case must not matter when typing it back');
+});
+
+test('a passkey secret wraps the same master key a passphrase does', async () => {
+  const masterKey = newMasterKey();
+  /* What the authenticator returns from the PRF extension: 32 bytes, stable per credential. */
+  const prf = randomBytes(32);
+  const wrapped = await wrapWithPasskey(prf, masterKey);
+  assert.deepEqual(await unwrapWithPasskey(prf, wrapped), masterKey);
+  await assert.rejects(() => unwrapWithPasskey(randomBytes(32), wrapped), 'another passkey must not open it');
+  /* Distinct wrappers of one key: adding a passkey never re-encrypts the library. */
+  const kek = (await deriveKeys('correct horse 9', newSalt())).kek;
+  assert.deepEqual(await unwrapMasterKey(kek, await wrapMasterKey(kek, masterKey)), masterKey);
+});
+
+test('a short PRF output is refused rather than silently padded', async () => {
+  await assert.rejects(() => wrapWithPasskey(randomBytes(16), newMasterKey()), /usable secret/);
 });

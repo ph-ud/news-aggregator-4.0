@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { hashAuthKey, verifyAuthKey, newSessionToken, hashToken, decoySalt, serverSecret, rateLimit, clearRateLimit, SESSION_TTL_DAYS } from './auth.mjs';
 import { readJson, sendJson, parseCookies, sessionCookie, clearedCookie, sameOrigin } from './http.mjs';
+import { newChallenge, consumeChallenge, relyingParty, verifyClientData, verifyAuthenticatorData, verifyAssertionSignature, verifySignCount, ALGORITHMS } from './webauthn.mjs';
 
 /** Structural limits only. The server cannot inspect ciphertext, so these are the sole abuse controls. */
-const LIMITS = { recordBytes: 64 * 1024, recordsPerUser: 5000, batch: 200, iterations: { min: 100000, max: 2000000 } };
+const LIMITS = { recordBytes: 64 * 1024, recordsPerUser: 5000, batch: 200, iterations: { min: 100000, max: 2000000 }, passkeysPerUser: 10 };
 const fail = (status, message) => Object.assign(new Error(message), { status });
 
 const asString = (value, max) => (typeof value === 'string' && value.length && value.length <= max ? value : null);
@@ -29,6 +30,7 @@ function currentUser(db, request) {
 }
 
 const profileOf = (user) => ({ id: user.id, email: user.email, name: user.name });
+const passkeysOf = (db, userId) => db.prepare('select credential_id as id, created_at as addedAt from passkeys where user_id = ? order by created_at').all(userId);
 const secretsOf = (user) => ({ wrappedMk: JSON.parse(user.wrapped_mk), kdfSalt: user.kdf_salt, iterations: user.kdf_iterations });
 
 const routes = {
@@ -112,7 +114,8 @@ const routes = {
     const auth = hashAuthKey(authKey);
     db.prepare('update users set auth_hash = ?, auth_salt = ?, kdf_salt = ?, kdf_iterations = ?, wrapped_mk = ? where id = ?')
       .run(auth.hash, auth.salt, kdfSalt, iterations, wrappedMk, user.id);
-    /* Every other device's session dies with the old passphrase. */
+    /* Every other device's session dies with the old passphrase. Passkeys are left alone:
+       like the recovery key, each wraps the same unchanged master key. */
     db.prepare('delete from sessions where user_id = ?').run(user.id);
     sendJson(response, 200, { ok: true }, startSession(db, response, user.id));
   },
@@ -125,7 +128,85 @@ const routes = {
 
   'GET /api/auth/me': async (db, request, response, user) => {
     if (!user) return sendJson(response, 200, { signedIn: false });
-    sendJson(response, 200, { signedIn: true, profile: profileOf(user), ...secretsOf(user) });
+    sendJson(response, 200, { signedIn: true, profile: profileOf(user), ...secretsOf(user), passkeys: passkeysOf(db, user.id) });
+  },
+
+  /* ---------- passkeys ----------
+     A passkey is a second wrapper around the same master key, opened by a secret the
+     authenticator derives through the PRF extension and discloses to nobody. The server
+     verifies the assertion and hands back a blob it cannot read; only the authenticator,
+     after the reader's fingerprint or PIN, produces the secret that opens it. */
+
+  'POST /api/auth/passkey/challenge': async (db, request, response, user) => {
+    const body = await readJson(request);
+    const purpose = body.purpose === 'register' ? 'register' : 'unlock';
+    if (purpose === 'register' && !user) throw fail(401, 'Sign in first.');
+    if (purpose === 'unlock' && !rateLimit(`passkey:${request.socket.remoteAddress || 'unknown'}`, { limit: 20 })) throw fail(429, 'Too many attempts. Wait a minute and try again.');
+    const { id: rpId } = relyingParty(request);
+    sendJson(response, 200, {
+      challenge: newChallenge(db, purpose, user?.id || null),
+      rpId,
+      ...(purpose === 'register' ? { userId: Buffer.from(user.id).toString('base64url'), userName: user.email, userDisplayName: user.name, existing: passkeysOf(db, user.id).map((key) => key.id) } : {}),
+    });
+  },
+
+  /* Registration runs inside an authenticated session and requests no attestation, so the
+     browser's own `getPublicKey()` is the public key of record and there is no CBOR to parse.
+     The wrapped master key arrives already encrypted under the passkey's PRF secret. */
+  'POST /api/auth/passkey/register': async (db, request, response, user) => {
+    if (!user) throw fail(401, 'Sign in first.');
+    const body = await readJson(request);
+    const credentialId = asString(body.credentialId, 512);
+    const publicKey = asString(body.publicKey, 2048);
+    const algorithm = Number(body.algorithm);
+    const wrappedMk = asWrapped(body.wrappedMk);
+    if (!credentialId || !publicKey || !wrappedMk) throw fail(400, 'Incomplete passkey.');
+    if (![ALGORITHMS.ES256, ALGORITHMS.RS256].includes(algorithm)) throw fail(400, 'Unsupported passkey algorithm.');
+    if (passkeysOf(db, user.id).length >= LIMITS.passkeysPerUser) throw fail(409, 'That account already has the maximum number of passkeys.');
+    if (db.prepare('select 1 from passkeys where credential_id = ?').get(credentialId)) throw fail(409, 'That passkey is already registered.');
+
+    const { id: rpId, origin } = relyingParty(request);
+    const challenge = consumeChallenge(db, body.challenge, 'register', user.id);
+    verifyClientData(body.clientDataJSON, { type: 'webauthn.create', challenge: challenge.challenge, origin });
+    const authenticator = verifyAuthenticatorData(body.authenticatorData, { rpId });
+    db.prepare('insert into passkeys (credential_id, user_id, public_key, algorithm, sign_count, wrapped_mk, created_at) values (?, ?, ?, ?, ?, ?, ?)')
+      .run(credentialId, user.id, publicKey, algorithm, authenticator.signCount, wrappedMk, new Date().toISOString());
+    sendJson(response, 201, { ok: true, passkeys: passkeysOf(db, user.id) });
+  },
+
+  /* The assertion both authenticates the account and identifies it: a discoverable credential
+     means the reader types no email. The response carries the passkey-wrapped master key,
+     which is useless without the secret the authenticator just produced in the browser. */
+  'POST /api/auth/passkey/assert': async (db, request, response) => {
+    const body = await readJson(request);
+    const credentialId = asString(body.credentialId, 512);
+    if (!credentialId) throw fail(400, 'Incomplete passkey response.');
+    if (!rateLimit(`passkey-assert:${credentialId}`)) throw fail(429, 'Too many attempts. Wait a minute and try again.');
+    const passkey = db.prepare('select * from passkeys where credential_id = ?').get(credentialId);
+    /* Same message whether the credential is unknown or the signature is wrong. */
+    if (!passkey) throw fail(401, 'That passkey did not match.');
+
+    const { id: rpId, origin } = relyingParty(request);
+    const challenge = consumeChallenge(db, body.challenge, 'unlock');
+    verifyClientData(body.clientDataJSON, { type: 'webauthn.get', challenge: challenge.challenge, origin });
+    const authenticator = verifyAuthenticatorData(body.authenticatorData, { rpId });
+    verifyAssertionSignature({ publicKey: passkey.public_key, algorithm: passkey.algorithm, authenticatorData: body.authenticatorData, clientDataJSON: body.clientDataJSON, signature: body.signature });
+    const signCount = verifySignCount(passkey.sign_count, authenticator.signCount);
+    db.prepare('update passkeys set sign_count = ? where credential_id = ?').run(signCount, credentialId);
+    clearRateLimit(`passkey-assert:${credentialId}`);
+
+    const user = db.prepare('select * from users where id = ?').get(passkey.user_id);
+    if (!user) throw fail(401, 'That passkey did not match.');
+    sendJson(response, 200, { profile: profileOf(user), wrappedMk: JSON.parse(passkey.wrapped_mk) }, startSession(db, response, user.id));
+  },
+
+  'POST /api/auth/passkey/remove': async (db, request, response, user) => {
+    if (!user) throw fail(401, 'Sign in first.');
+    const body = await readJson(request);
+    const credentialId = asString(body.credentialId, 512);
+    if (!credentialId) throw fail(400, 'Which passkey?');
+    db.prepare('delete from passkeys where credential_id = ? and user_id = ?').run(credentialId, user.id);
+    sendJson(response, 200, { ok: true, passkeys: passkeysOf(db, user.id) });
   },
 
   'GET /api/records': async (db, request, response, user, url) => {

@@ -3,6 +3,7 @@ import { html, raw, SafeHtml } from './src/html.js';
 import { store } from './src/store.js';
 import { createAuthTools } from './src/auth-tools.js';
 import { credentialsAvailable, rememberCredential, savedCredential, forgetSilentAccess } from './src/credentials.js';
+import { passkeysSupported } from './src/passkeys.js';
 import { formatRecoveryKey } from './src/crypto.js';
 
 const app = document.querySelector('#app');
@@ -17,6 +18,9 @@ let toolsRegistered = false;
 let rekeyInFlight = false;
 /* Whether this browser has a password store to offer. Fixed for the life of the page. */
 const hasPasswordManager = credentialsAvailable();
+/* Passkeys are the one credential an agent driving this browser cannot use: unlocking
+   needs a fingerprint, a face, or a device PIN. */
+const hasPasskeys = passkeysSupported();
 
 const library = () => store.library;
 const settings = () => store.library.settings;
@@ -95,6 +99,17 @@ async function signInWithSavedCredential() {
   state.authBusy = true; state.authError = ''; render();
   try { await signIn(credential); return true; }
   catch (error) { state.authError = `${error.message} The saved passphrase may be out of date — type it to sign in, and the browser will offer to update it.`; return false; }
+  finally { state.authBusy = false; render(); }
+}
+
+/**
+ * Unlock with a passkey. Like the saved-credential path this runs only from the reader's own
+ * click, and the authenticator will not produce the secret without verifying a person.
+ */
+async function unlockWithPasskeyFromForm() {
+  state.authBusy = true; state.authError = ''; render();
+  try { await store.signInWithPasskey(); state.view = 'library'; registerWebMcpTools(); toast(`Welcome back, ${store.profile.name}.`); }
+  catch (error) { if (error.name !== 'NotAllowedError') state.authError = error.message; }
   finally { state.authBusy = false; render(); }
 }
 
@@ -199,6 +214,7 @@ function authView() {
     : html`<label>Passphrase<input name="passphrase" type="password" autocomplete="${isSignUp ? 'new-password' : 'current-password'}" required placeholder="At least 8 characters with a number" /></label>`}
   ${state.authError ? html`<p class="auth-error" role="alert">${state.authError}</p>` : ''}
   <button class="primary-button auth-submit" type="submit" ${state.authBusy ? 'disabled' : ''}>${state.authBusy ? 'Deriving your key…' : submitLabel} ${icon('arrow')}</button></form>
+  ${hasPasskeys && !isSignUp && !isRecover && html`<button class="pill-button pill-wide passkey-button" type="button" data-action="unlock-passkey">${icon('lock')}<span>Unlock with a passkey</span></button>`}
   ${hasPasswordManager && !isSignUp && !isRecover && html`<p class="auth-note"><button class="link-button" type="button" data-action="use-saved-credential">Use a passphrase saved in this browser</button></p>`}
   ${isRecover
     ? html`<p class="auth-note"><button class="link-button" data-action="auth-mode" data-mode="signin">Back to sign in</button></p>`
@@ -235,6 +251,12 @@ function accountView() {
   return html`<div class="shell">${sidebar()}<main class="library-main"><header class="topbar"><span>${today()}</span><span class="page-count">Account</span></header>
   <section class="library-hero"><p class="eyebrow">Account</p><h1>Your keys,<br><em>your shelf.</em></h1><p>${store.profile.name} · ${store.profile.email}</p></section>
   <section class="account-grid"><div class="account-block"><p class="eyebrow">Change passphrase</p><h2>Set a new passphrase</h2><p class="account-copy">Your passphrase never reaches the server. Changing it re-wraps the key your library is already encrypted with, so nothing has to be re-encrypted or re-uploaded — and your recovery key keeps working.</p>${passphraseForm()}</div>
+  ${hasPasskeys && html`<div class="account-block"><p class="eyebrow">Passkeys</p><h2>Unlock with your device</h2><p class="account-copy">A passkey adds a second way into the same library, held by this device and opened with your fingerprint, face, or device PIN. It re-encrypts nothing and replaces neither your passphrase nor your recovery key — and because the secret lives in the authenticator, an assistant driving this browser cannot use it.</p>
+  ${store.passkeys.length ? html`<ul class="account-list passkey-list">${store.passkeys.map((passkey) => html`<li>${icon('check')}<span>Added ${date(passkey.addedAt)}</span><button class="link-button" data-action="remove-passkey" data-passkey="${passkey.id}">Remove</button></li>`)}</ul>` : html`<p class="account-copy">No passkey on this account yet.</p>`}
+  <form class="auth-form passkey-form" data-form="passkey" novalidate><label>Current passphrase<input name="current" type="password" autocomplete="current-password" required placeholder="Confirms it is you" /></label>
+  <p class="auth-error" role="alert" data-role="passkey-error" hidden></p>
+  <button class="primary-button auth-submit" type="submit"><span data-role="label">Add a passkey</span> ${icon('arrow')}</button></form>
+  <p class="auth-note">Your passphrase is needed once here: it is the only thing that can produce the key a passkey then wraps.</p></div>`}
   <div class="account-block account-facts"><p class="eyebrow">What this does</p><ul class="account-list"><li>${icon('lock')}<span>Derives a new key from the new passphrase and re-wraps the same master key.</span></li><li>${icon('bell')}<span>Signs you out everywhere else. Other devices need the new passphrase to return.</span></li><li>${icon('bookmark')}<span>Leaves your ${library().stories.length} ${library().stories.length === 1 ? 'story' : 'stories'} and ${library().subscriptions.length} ${library().subscriptions.length === 1 ? 'subscription' : 'subscriptions'} untouched.</span></li></ul><p class="account-copy">If you forget the new passphrase, your recovery key is still the only way back. We cannot reset it for you.</p></div></section></main>
   <aside class="library-aside"><div class="aside-block aside-note"><span>${icon('lock')}</span><p>The server stores your library as ciphertext it cannot open, and only ever sees a value derived from your passphrase — never the passphrase itself.</p></div></aside></div>`;
 }
@@ -439,6 +461,28 @@ document.addEventListener('submit', async (event) => {
     return;
   }
 
+  const passkeyFormElement = event.target.closest('[data-form="passkey"]');
+  if (passkeyFormElement) {
+    event.preventDefault();
+    const button = passkeyFormElement.querySelector('button[type="submit"]');
+    if (button.disabled) return;
+    /* Updated in place, like the passphrase form: a re-render would clear the field. */
+    const message = passkeyFormElement.querySelector('[data-role="passkey-error"]');
+    const label = button.querySelector('[data-role="label"]');
+    const current = String(new FormData(passkeyFormElement).get('current') || '');
+    message.hidden = true; button.disabled = true; label.textContent = 'Waiting for your device…';
+    try {
+      await store.addPasskey({ current });
+      render();
+      toast('Passkey added. You can unlock with it next time.');
+    } catch (error) {
+      /* Dismissing the device prompt is a decision, not a failure worth shouting about. */
+      if (error.name !== 'NotAllowedError') { message.textContent = error.message; message.hidden = false; }
+      button.disabled = false; label.textContent = 'Add a passkey';
+    }
+    return;
+  }
+
   const form = event.target.closest('[data-form="auth"]');
   if (!form) return;
   event.preventDefault();
@@ -494,6 +538,12 @@ document.addEventListener('click', async (event) => {
   if (action === 'auth-mode') { state.authMode = mode; state.authError = ''; render(); return; }
   /* The chooser is browser UI, and this is the reader's own click — see signInWithSavedCredential. */
   if (action === 'use-saved-credential') { await signInWithSavedCredential(); return; }
+  if (action === 'unlock-passkey') { await unlockWithPasskeyFromForm(); return; }
+  if (action === 'remove-passkey') {
+    try { await store.removePasskey(button.dataset.passkey); toast('Passkey removed.'); }
+    catch (error) { toast(error.message); }
+    render(); return;
+  }
   if (action === 'copy-recovery') { navigator.clipboard?.writeText(formatRecoveryKey(state.recoveryKey)).then(() => toast('Recovery key copied.'), () => toast('Copy failed — write it down instead.')); return; }
   if (action === 'finish-recovery') { state.recoveryKey = ''; state.view = 'library'; toast(`Welcome, ${store.profile.name}.`); render(); return; }
   if (action === 'sign-out') { await signOut(); toast('Signed out. Your library stays encrypted on the server.'); return; }
