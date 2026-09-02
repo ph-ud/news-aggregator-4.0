@@ -153,3 +153,31 @@ test('the database on disk contains no readable library content', async () => {
   /* The passphrase must not be derivable from anything stored either. */
   assert.equal(dump.includes('reads2026shelf'), false, 'the passphrase must never reach the server');
 });
+
+test('serves a content security policy that denies by default', async () => {
+  const response = await fetch(`${base}/`);
+  const policy = response.headers.get('content-security-policy');
+  assert.ok(policy, 'the document must carry a policy');
+  const directives = Object.fromEntries(policy.split(';').map((part) => { const [name, ...values] = part.trim().split(/\s+/); return [name, values.join(' ')]; }));
+
+  assert.equal(directives['default-src'], "'none'", 'start from deny-all so a new resource type is not silently allowed');
+  assert.equal(directives['script-src'], "'self'", 'no inline script, no third-party script');
+  assert.equal(directives['base-uri'], "'none'", 'an injected <base> would retarget every relative module import');
+  assert.equal(directives['form-action'], "'none'", 'an injected form must not be able to post a passphrase away');
+  assert.equal(directives['frame-ancestors'], "'none'");
+  assert.equal(directives['connect-src'], "'self'", 'decrypted content must not be postable to another origin');
+  /* Deliberate concessions: inline style attributes, and images the agent chooses. */
+  assert.match(directives['style-src'], /'unsafe-inline'/);
+  assert.match(directives['img-src'], /https:/);
+  assert.equal(/'unsafe-inline'|'unsafe-eval'/.test(directives['script-src']), false, 'script-src must never be relaxed');
+
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+  const api = await fetch(`${base}/api/auth/me`);
+  assert.equal(api.headers.get('x-content-type-options'), 'nosniff', 'API responses need it too');
+});
+
+test('the served markup carries no inline event handlers', async () => {
+  /* An inline handler would be dead code under this policy, so it must not creep back in. */
+  const scripts = await Promise.all(['/app.js', '/src/store.js', '/src/crypto.js'].map(async (path) => (await fetch(base + path)).text()));
+  for (const source of scripts) assert.equal(/\son[a-z]+\s*=\s*["']/.test(source), false, 'markup built in JS must not contain inline handlers');
+});

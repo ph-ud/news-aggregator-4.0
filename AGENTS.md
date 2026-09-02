@@ -35,6 +35,18 @@ Rules that keep this real rather than nominal:
 - **A forgotten passphrase cannot be reset.** The recovery key shown once at sign-up is the only fallback, and it is base32 so the written-down form converts back losslessly.
 - E2E in a browser does not defend against a malicious server serving hostile JavaScript. It defends against a leaked database, a stolen backup, and a curious operator.
 
+## Content Security Policy
+
+`server.mjs` serves a deny-by-default policy. This is not an anti-operator control — they write the policy — but an anti-XSS one, and XSS is the attack that walks straight through the encryption: the master key is a non-extractable `CryptoKey`, so injected script cannot steal the raw bytes, but it can still use the key to decrypt the library and post the plaintext out. Since the whole UI is built by concatenating agent-supplied text into `innerHTML`, one missed `escapeHtml` is a full compromise, and the policy is the backstop.
+
+- **Never add an inline event handler or inline `<script>`.** `script-src 'self'` blocks both; the image fallback uses a delegated capture-phase `error` listener for this reason. A test asserts no inline handlers creep back in.
+- `style-src` keeps `'unsafe-inline'` for style attributes such as `--reader-scale`; injected CSS is far less dangerous than injected script.
+- `img-src` is wide on purpose: article images are chosen by the agent.
+- `base-uri 'none'` matters more than it looks — without it an injected `<base>` retargets every relative module import.
+- Subresource Integrity was considered and rejected: every script is same-origin so there is no third party to protect against, and `integrity` does not cover a module's static imports, so it would hash `app.js` while leaving `crypto.js` unprotected.
+
+Making this policy meaningfully stronger means Trusted Types (`require-trusted-types-for 'script'`), which would route every `innerHTML` assignment through an explicit policy. That is a separate piece of work.
+
 `tests/api.test.mjs` asserts that a full write leaves no plaintext in the database file or its write-ahead log, with a positive control so the test cannot pass by writing nothing.
 
 ## Deployment

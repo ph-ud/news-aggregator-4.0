@@ -151,6 +151,9 @@ async function addCreators(topic, creators, mode = 'append') {
 
 async function updateSettings(patch) {
   await store.put({ id: 'settings', type: 'settings', value: { ...settings(), ...patch } });
+  /* The click handler renders synchronously, before this write resolves, so the reader
+     controls need their own repaint or the change never reaches the DOM. */
+  render();
 }
 
 /* ---------- views ---------- */
@@ -197,7 +200,7 @@ function sidebar() { const { stories: feed, saved, folders, subscriptions } = li
 function faviconFor(story) { const host = hostOf(story.url); return host ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=96` : ''; }
 function storyImage(story) { return story.imageUrl ? safeUrl(story.imageUrl) : faviconFor(story); }
 function storyMeta(story) { return `<div class="story-meta"><span>${escapeHtml(story.source)}</span><i></i><span>${date(story.publishedAt)}</span></div>`; }
-function cover(story, large = false) { const image = storyImage(story); const mark = escapeHtml(initials(story.source)); return `<div class="cover ${large ? 'cover-large' : ''} ${story.imageUrl ? '' : 'cover-logo'}"><span>${mark}</span>${image ? `<img src="${escapeHtml(image)}" alt="" loading="lazy" onerror="this.remove()" />` : ''}</div>`; }
+function cover(story, large = false) { const image = storyImage(story); const mark = escapeHtml(initials(story.source)); return `<div class="cover ${large ? 'cover-large' : ''} ${story.imageUrl ? '' : 'cover-logo'}"><span>${mark}</span>${image ? `<img src="${escapeHtml(image)}" alt="" loading="lazy" data-fallback="remove" />` : ''}</div>`; }
 function saveButton(story, wide = false) { const saved = isSaved(story.id); return `<button class="pill-button ${saved ? 'is-on' : ''} ${wide ? 'pill-wide' : ''}" data-action="toggle-save" data-story="${escapeHtml(story.id)}" aria-pressed="${saved}">${icon(saved ? 'bookmarkFill' : 'bookmark')}<span>${saved ? 'Saved' : 'Save'}</span></button>`; }
 function subscribeButton(source, wide = false) { const on = isSubscribed(source.url); return `<button class="pill-button ${on ? 'is-on' : ''} ${wide ? 'pill-wide' : ''}" data-action="toggle-subscribe" data-url="${escapeHtml(source.url)}" data-name="${escapeHtml(source.name)}" data-kind="${escapeHtml(source.kind || 'blog')}" aria-pressed="${on}">${icon(on ? 'check' : 'bell')}<span>${on ? 'Subscribed' : 'Subscribe'}</span></button>`; }
 function storyActions(story, wide = false) { return `<div class="card-actions">${saveButton(story, wide)}${subscribeButton({ url: story.url, name: story.source, kind: 'blog' }, wide)}</div>`; }
@@ -336,6 +339,13 @@ document.addEventListener('submit', async (event) => {
   } catch (error) { state.authError = error.message; }
   finally { state.authBusy = false; render(); }
 });
+
+/* Replaces the inline onerror the content security policy forbids. Error events do not
+   bubble, so this has to listen during capture. */
+document.addEventListener('error', (event) => {
+  const image = event.target;
+  if (image instanceof HTMLImageElement && image.dataset.fallback === 'remove') image.remove();
+}, true);
 
 document.addEventListener('change', (event) => {
   const box = event.target.closest('[data-action="confirm-recovery"]');
