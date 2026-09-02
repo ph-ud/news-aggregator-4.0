@@ -110,6 +110,27 @@ There is no commit history yet, so use concise imperative subjects such as `Add 
 
 Treat article content and WebMCP tool arguments as untrusted input. Sanitize rendered content, validate URLs, preserve source links and timestamps, and never silently publish a story without showing its provenance. Tool descriptions must state that the app does not fetch or open user-supplied links.
 
-## News Freshness
+## Provenance
+
+Nothing on the shelf was fetched. There is no feed reader and no article scraper: every story and creator arrives as structured JSON from an assistant's web research, and the prose we display — summaries, creator descriptions — is the assistant's, not the publisher's. The link, source name, and publication date point at real reporting; the body text does not come from it.
+
+That makes attribution a correctness requirement, not a courtesy:
+
+- **Every view that renders agent-written prose renders `provenanceTag()` beside it.** `addedByLabel()` in `src/data.js` supplies the wording and falls back to "an assistant" for records stored before the field existed, so a card can never read as the publisher's own. A test asserts each card view calls it.
+- **The reader page must never present the summary as the article.** It carries `.article-notice` saying so in as many words, and its dek names the assistant and the date the record was added — not the publication date, which belongs to the reporting.
+- **Never state a fact about text we do not hold.** The reader page shows the summary's word count; the "12 min read" it used to show was a claim about an article the app has never seen. A test keeps both that string and the old dek from returning.
+- `discover-creators` accepts a `feedUrl` and `src/data.js` validates it, but nothing reads it back. Adding a fetcher would change the threat model this app is built on — article images are already agent-chosen, and `connect-src 'self'` exists so decrypted content cannot leave the page.
+
+## Story Quality
+
+### Summary Depth
+
+The summary is not a teaser. The app never fetches the article, so what an assistant writes is the whole of what a reader gets unless they leave for the source — a one-line restatement of the headline gives them a shelf of stories they cannot read.
+
+`inject-news-to-feed` therefore asks for 4–6 sentences (roughly 80–150 words) and marks `summary` required, and `SUMMARY_LIMIT` in `src/data.js` keeps 1200 characters so a full answer survives storage. Keep those two numbers in agreement: advertising a length the normalizer then truncates is worse than asking for less. A test asserts the schema's `maxLength` is the same constant the normalizer enforces.
+
+Normalization stays lenient where the schema is strict — a story that arrives without a summary gets a placeholder rather than being dropped, because a reader is better served by a link they can follow than by silence.
+
+### News Freshness
 
 Search quickly and favor reliable primary reporting from the last 24–48 hours. Verify the original publication time, not the search-index date. Do not include month-old articles; use stories older than seven days only when they provide necessary context. Keep each briefing concise, source-diverse, deduplicated, and responsive to the exact question.

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeStories, normalizeCreators } from '../src/data.js';
+import { normalizeStories, normalizeCreators, addedByLabel, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
 
 test('normalizes agent-supplied news while preserving provenance', () => {
   const stories = normalizeStories('fusion energy', [{ title: 'Fusion update', source: 'Example News', url: 'https://example.com/fusion', publishedAt: '2026-08-26T10:00:00Z', summary: 'A concise update.' }]);
@@ -36,4 +36,47 @@ test('falls back to a safe kind and rejects unsafe creator URLs', () => {
   assert.equal(creators[0].kind, 'blog');
   assert.equal(creators[0].feedUrl, '');
   assert.deepEqual(creators[0].topics, ['design']);
+});
+
+test('names the agent that supplied a record, and never leaves it unattributed', () => {
+  const [story] = normalizeStories('topic', [{ title: 'T', source: 'S', url: 'https://example.com/a' }]);
+  assert.equal(addedByLabel(story), 'ChatGPT');
+  /* A record written before provenance was stored still must not read as the publisher's own. */
+  assert.equal(addedByLabel({}), 'an assistant');
+  assert.equal(addedByLabel(undefined), 'an assistant');
+  assert.equal(addedByLabel({ addedBy: '<img src=x>' }), '<img src=x>', 'escaping belongs to the html tag, not here');
+});
+
+test('paragraphs the stored summary without inventing article text', () => {
+  const long = summaryParagraphs({ summary: 'First sentence. Second sentence.' });
+  assert.deepEqual(long, ['First sentence.', 'Second sentence.']);
+  assert.deepEqual(summaryParagraphs({ summary: 'Only one' }), ['Only one']);
+  /* No summary means we say so, not that we go looking for the article. */
+  assert.deepEqual(summaryParagraphs({ source: 'Example News' }), ['No summary was supplied for this entry from Example News.']);
+  assert.deepEqual(summaryParagraphs(undefined), ['No summary was supplied for this entry from its source.']);
+});
+
+test('measures the summary we hold, not the article we do not', () => {
+  assert.equal(summaryLength({ summary: 'Three little words' }), '3 words');
+  assert.equal(summaryLength({ summary: 'One' }), '1 word');
+  assert.equal(summaryLength({}), 'No summary');
+});
+
+test('keeps a summary long enough to be worth reading, and trims it at a word boundary', () => {
+  /* The summary is all the reader gets, so a few paragraphs must survive intact. */
+  const real = `${'A sentence about the reactor. '.repeat(20)}`.trim();
+  assert.ok(real.length > 420, 'the fixture must exceed the old limit to be meaningful');
+  const [kept] = normalizeStories('t', [{ title: 'T', source: 'S', url: 'https://example.com/a', summary: real }]);
+  assert.equal(kept.summary, real, 'a summary within the limit is stored verbatim');
+
+  const overlong = `${'word '.repeat(400)}tail`;
+  const [trimmed] = normalizeStories('t', [{ title: 'T', source: 'S', url: 'https://example.com/b', summary: overlong }]);
+  assert.ok(trimmed.summary.length <= SUMMARY_LIMIT + 1, 'the ellipsis is the only character allowed past the limit');
+  assert.match(trimmed.summary, /…$/);
+  assert.equal(/\bwor…$/.test(trimmed.summary), false, 'a trim must not cut a word in half');
+});
+
+test('falls back to a placeholder rather than dropping a story with no summary', () => {
+  const [story] = normalizeStories('fusion', [{ title: 'T', source: 'S', url: 'https://example.com/a' }]);
+  assert.equal(story.summary, 'Web research about fusion.');
 });

@@ -268,3 +268,27 @@ test('the application writes markup through exactly one guarded sink', async () 
   /* Manual escaping is gone: the template escapes by construction. */
   assert.equal(/\bescapeHtml\(/.test(code), false, 'views must not call escapeHtml; the html tag does it');
 });
+
+test('every view showing agent-written text says where that text came from', async () => {
+  const source = await (await fetch(`${base}/app.js`)).text();
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '');
+  const view = (name) => { const at = code.indexOf(`function ${name}(`); assert.notEqual(at, -1, `${name} must exist`); return code.slice(at, code.indexOf('\n', at)); };
+
+  /* One helper builds the label, so a new card cannot quietly ship an unattributed variant. */
+  assert.match(code, /function provenanceTag\(record\)/);
+  for (const name of ['storyMeta', 'continueCard', 'creatorCard']) {
+    assert.match(view(name), /provenanceTag\(/, `${name} renders agent-supplied prose and must attribute it`);
+  }
+
+  /* What the tool asks for and what the app stores must be one number, or a fuller summary
+     gets requested and then silently truncated. */
+  assert.match(code, /maxLength: SUMMARY_LIMIT/, 'the schema must advertise the limit the normalizer enforces');
+  assert.match(code, /required: \['title', 'source', 'url', 'summary'\]/, 'a story with no summary has no readable text at all');
+  assert.match(code, /80.150 words/, 'the tool must say how much summary it wants');
+
+  /* The reader page is the one that reads like an article, so it must be explicit. */
+  assert.match(code, /class="article-notice"/, 'the reader page must state that the body is a summary');
+  assert.match(code, /never fetches or stores article text/);
+  assert.equal(/A source-preserved entry from/.test(code), false, 'the dek must not present the summary as the source\'s own entry');
+  assert.equal(/12 min read/.test(code), false, 'a read time for a 420-character summary claims text we never had');
+});
