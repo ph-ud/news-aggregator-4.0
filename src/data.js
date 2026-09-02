@@ -37,3 +37,26 @@ export function normalizeCreators(topic, creators) {
 }
 
 export function creatorKinds() { return [...CREATOR_KINDS]; }
+
+/**
+ * Provenance helpers.
+ *
+ * Nothing on the shelf was fetched: there is no feed reader and no article scraper here. Every
+ * story and creator arrives as structured JSON from an assistant's web research, and the prose
+ * we display — summaries, descriptions — is the assistant's, not the publisher's. Views must say
+ * so, so the wording lives here where it is pure and testable rather than inline in a template.
+ */
+export function addedByLabel(record) { return asText(record?.addedBy, 60) || 'an assistant'; }
+
+/** Paragraphs for the reader page. This is the summary we hold, never the article we do not. */
+export function summaryParagraphs(story) {
+  const summary = asText(story?.summary, 420) || `No summary was supplied for this entry from ${asText(story?.source, 100) || 'its source'}.`;
+  const paragraphs = summary.split(/(?<=[.!?])\s+/).filter(Boolean);
+  return paragraphs.length > 1 ? paragraphs : [summary];
+}
+
+/** Length of the summary, so the reader page never advertises a read time for text it lacks. */
+export function summaryLength(story) {
+  const words = (asText(story?.summary, 420).match(/\S+/g) || []).length;
+  return words ? `${words} ${words === 1 ? 'word' : 'words'}` : 'No summary';
+}
