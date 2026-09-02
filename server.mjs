@@ -37,6 +37,10 @@ const contentSecurityPolicy = [
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'none'",
+  /* Every innerHTML assignment must go through a policy. Naming the one allowed policy
+     stops injected script from registering a permissive one of its own. */
+  "require-trusted-types-for 'script'",
+  'trusted-types reads-views',
 ].join('; ');
 const mimeTypes = { '.css': 'text/css; charset=utf-8', '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml' };
 

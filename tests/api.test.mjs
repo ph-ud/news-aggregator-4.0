@@ -238,6 +238,10 @@ test('serves a content security policy that denies by default', async () => {
   assert.match(directives['img-src'], /https:/);
   assert.equal(/'unsafe-inline'|'unsafe-eval'/.test(directives['script-src']), false, 'script-src must never be relaxed');
 
+  /* Trusted Types: every innerHTML assignment must go through the one named policy. */
+  assert.equal(directives['require-trusted-types-for'], "'script'");
+  assert.equal(directives['trusted-types'], 'reads-views', 'pinning the policy name stops injected script registering a permissive one');
+
   assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
   const api = await fetch(`${base}/api/auth/me`);
   assert.equal(api.headers.get('x-content-type-options'), 'nosniff', 'API responses need it too');
@@ -247,4 +251,20 @@ test('the served markup carries no inline event handlers', async () => {
   /* An inline handler would be dead code under this policy, so it must not creep back in. */
   const scripts = await Promise.all(['/app.js', '/src/store.js', '/src/crypto.js'].map(async (path) => (await fetch(base + path)).text()));
   for (const source of scripts) assert.equal(/\son[a-z]+\s*=\s*["']/.test(source), false, 'markup built in JS must not contain inline handlers');
+});
+
+test('the application writes markup through exactly one guarded sink', async () => {
+  const source = await (await fetch(`${base}/app.js`)).text();
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '');
+  const sinks = code.match(/\.(innerHTML|outerHTML)\s*=|insertAdjacentHTML\(|document\.write\(/g) || [];
+  assert.equal(sinks.length, 1, `expected one sink, found ${sinks.length}: ${sinks.join(', ')}`);
+  assert.match(code, /function paint\(view\)/, 'that sink is paint()');
+  assert.match(code, /if \(!\(view instanceof SafeHtml\)\) throw/, 'paint() must reject anything not built by the html template');
+
+  /* A pass-through policy would satisfy the CSP while protecting nothing. */
+  assert.match(code, /createHTML: \(value, source\) =>/);
+  assert.match(code, /source\.value !== value\) throw new TypeError/, 'the policy must verify provenance, not rubber-stamp');
+
+  /* Manual escaping is gone: the template escapes by construction. */
+  assert.equal(/\bescapeHtml\(/.test(code), false, 'views must not call escapeHtml; the html tag does it');
 });

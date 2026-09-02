@@ -59,7 +59,22 @@ Re-keying deletes every session for the account server-side, so other devices mu
 - `base-uri 'none'` matters more than it looks — without it an injected `<base>` retargets every relative module import.
 - Subresource Integrity was considered and rejected: every script is same-origin so there is no third party to protect against, and `integrity` does not cover a module's static imports, so it would hash `app.js` while leaving `crypto.js` unprotected.
 
-Making this policy meaningfully stronger means Trusted Types (`require-trusted-types-for 'script'`), which would route every `innerHTML` assignment through an explicit policy. That is a separate piece of work.
+## Trusted Types
+
+`require-trusted-types-for 'script'` makes every `innerHTML` assignment a `TypeError` unless the value comes from a registered policy, and `trusted-types reads-views` allows exactly one policy name so injected script cannot register a permissive one of its own.
+
+The policy is **not** a pass-through. `createHTML(value, source)` verifies that the string was produced by the `html` template in `src/html.js`, which escapes every interpolation by construction. A policy of the shape `createHTML: (s) => s` would satisfy the CSP while protecting nothing; a test asserts ours checks provenance.
+
+Rules for writing views:
+
+- **Build every view with the `html` tagged template**, and return `SafeHtml`. `paint()` is the only sink in the application and rejects anything else.
+- **Never call `escapeHtml` in a view.** The tag already escapes; doing both double-escapes and shows `&amp;lt;` to the reader. A test asserts no view calls it.
+- **A quoted string containing markup will be escaped, not rendered.** This is the easy mistake: `${cond ? '<p>hi</p>' : ''}` renders the tags as text. Use `html\`<p>hi</p>\`` for both branches.
+- **`raw()` is the escape hatch and is only for markup we wrote ourselves** — `icon()` uses it. Never pass it anything derived from a record, a tool argument, or any other agent-supplied value.
+- **`false` serializes to nothing**, so that `${cond && html\`...\`}` works. Boolean attributes therefore need `${String(value)}`, or `aria-pressed` silently becomes `""`.
+- Arrays of `SafeHtml` serialize themselves; no `.join('')` needed.
+
+Trusted Types is defence in depth rather than the primary control: with `script-src 'self'` already blocking inline handlers, injected `<script>`, and `javascript:` URLs, most DOM-XSS paths are shut before this. What it adds is structural — unescaped interpolation becomes impossible to write, and the sink set stays auditable.
 
 `tests/api.test.mjs` asserts that a full write leaves no plaintext in the database file or its write-ahead log, with a positive control so the test cannot pass by writing nothing.
 
