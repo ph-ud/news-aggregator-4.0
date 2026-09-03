@@ -9,10 +9,17 @@ import { formatRecoveryKey } from './src/crypto.js';
 const app = document.querySelector('#app');
 const toastRegion = document.querySelector('#toast-region');
 
+/* How many cards a shelf paints before it waits for the reader to reach the end of them. */
+const FEED_PAGE = 12;
+
 const state = {
   activeFolder: 'all', view: 'library', selectedStoryId: null, newStoryIds: [],
   authMode: 'signin', authError: '', authBusy: false, authDraft: { name: '', email: '' },
   settingsOpen: false, settingsSection: 'subscriptions',
+  /* How far down each shelf has been unrolled, keyed by tab. Keyed rather than single so no
+     code path has to remember to reset it: switching tabs lands on that tab's own count,
+     and a tab the reader already scrolled is still where they left it. */
+  feedLimits: {},
   recoveryKey: '', booting: true, webmcp: { supported: false, registered: 0 },
 };
 /* Names already handed to document.modelContext.registerTool(). Tracking this instead of a
@@ -147,6 +154,22 @@ function storiesForFolder() {
   if (state.activeFolder === 'rss') return sortStoriesByDate(stories.filter(isFromFeed));
   if (state.activeFolder === 'ai') return sortStoriesByDate(stories.filter((story) => !isFromFeed(story)));
   return sortStoriesByDate(stories.filter((story) => (story.tagIds || []).includes(state.activeFolder)));
+}
+/**
+ * The feed is unrolled rather than paged: `FEED_PAGE` cards at a time, extended as the reader
+ * arrives at the end of what is painted.
+ *
+ * Nothing is fetched to extend it — the whole library is already decrypted in this page, so
+ * this is only about how much of it is in the document at once. A shelf with a few hundred
+ * entries would otherwise paint every card on every render, and every render is a full repaint.
+ */
+function feedLimit() { return state.feedLimits[state.activeFolder] || FEED_PAGE; }
+function growFeed() {
+  const total = storiesForFolder().length;
+  if (feedLimit() >= total) return false;
+  state.feedLimits[state.activeFolder] = feedLimit() + FEED_PAGE;
+  render();
+  return true;
 }
 function feedStories() { return library().stories.filter(isFromFeed); }
 function pendingFeeds() { return library().subscriptions.filter((entry) => !entry.feedUrl); }
@@ -429,7 +452,19 @@ function emptyFeed() {
   return html`<section class="empty-feed"><div class="empty-book">${icon('book')}</div><p class="eyebrow">A blank first page</p><h2>Subscribe to someone worth reading.</h2><p>Two things fill this shelf: feeds you subscribe to, which arrive as the publisher wrote them, and stories an assistant researches for you, which arrive as its summaries. Head to Discover to find people to follow, or ask for news on a topic.</p><span class="empty-hint">Every card says which of the two it is.</span></section>`;
 }
 function storyCard(story, index) { const isNew = state.newStoryIds.includes(story.id); return html`<article class="story-card ${isNew ? 'story-arriving' : ''} ${isFromFeed(story) ? 'story-rss' : 'story-ai'} ${isUnread(story) ? 'is-unread' : 'is-read'}" style="--arrival-index:${index}"><button class="cover-button" data-action="open-reader" data-story="${story.id}" aria-label="Open ${story.title}">${cover(story)}</button><div class="story-card-copy"><p class="story-kicker">${story.folderName || story.category || 'Reading'}</p><h3>${story.title}</h3><p class="summary">${story.summary}</p>${storyActions(story)}<footer>${storyMeta(story)}<button class="read-link" data-action="open-reader" data-story="${story.id}">Read ${icon('arrow')}</button></footer></div></article>`; }
-function continueCard(story) { return html`<section class="continue-card ${isUnread(story) ? 'is-unread' : 'is-read'}"><div class="continue-cover">${cover(story, true)}</div><div class="continue-copy"><p class="eyebrow">Continue reading</p><h2>${story.title}</h2><p class="continue-source">${story.source} <span>·</span> ${date(story.publishedAt)}</p>${provenanceTag(story)}<p class="summary">${story.summary}</p><div class="continue-actions"><button class="primary-button" data-action="open-reader" data-story="${story.id}">Open story ${icon('arrow')}</button>${storyActions(story)}</div></div></section>`; }
+/**
+ * The bottom of the feed.
+ *
+ * More to come is a button, not a bare marker: the observer that presses it when the reader
+ * reaches it is a convenience, and a shelf that only grows for someone with a pointer and an
+ * IntersectionObserver is a shelf with stories nobody else can reach.
+ */
+function feedTail(remaining, total) {
+  if (remaining) return html`<div class="feed-more" data-role="feed-tail"><button class="pill-button pill-wide" data-action="show-more-stories">${icon('arrow')}<span>Show ${remaining === 1 ? '1 more story' : `${remaining} more stories`}</span></button><small>Unrolls on its own as you reach the end</small></div>`;
+  /* Said only to someone who scrolled for it. On a shelf that never had to unroll, the last
+     card's own rule is already the end of it. */
+  return total > FEED_PAGE ? html`<p class="feed-end">The end of this shelf</p>` : html``;
+}
 
 /**
  * Every note beside the article it was written on.
@@ -472,12 +507,18 @@ function libraryView() {
         : currentFolder
           ? { eyebrow: currentFolder.name, heading: currentFolder.name, title: html`Make room for<br><em>good stories.</em>`, lead: 'Reporting, blogs, and independent voices — saved with their source and ready when you are.' }
           : { eyebrow: `${store.profile.name}'s reading shelf`, heading: 'On your shelf', title: html`Make room for<br><em>good stories.</em>`, lead: 'Your subscriptions and your assistant\'s finds in one timeline, newest first by publication date.' };
-  const lead = stories[0]; const rest = stories.slice(1);
+  /* One feed, every card the same. There is no featured story: which entry happens to be
+     newest is not a claim that it is the one worth reading, and a shelf whose first item is
+     three times the size of the rest reads as an editor's front page rather than as the
+     reader's own timeline. The tabs differ in what they hold, never in how they present it. */
+  const visible = stories.slice(0, feedLimit());
+  const remaining = stories.length - visible.length;
   return html`<div class="shell">${sidebar()}<main class="library-main"><header class="topbar"><span>${today()}</span><span class="page-count">${unreadCount(stories) ? `${unreadCount(stories)} unread` : 'All read'}</span></header>
   <section class="library-hero"><p class="eyebrow">${page.eyebrow}</p><h1>${page.title}</h1><p>${page.lead}</p></section>
-  ${lead ? continueCard(lead) : emptyFeed()}
-  <section class="shelf-heading"><div><p class="eyebrow">${page.eyebrow}</p><h2>${page.heading}</h2></div><span>${stories.length ? 'Newest first' : 'Nothing here yet'}</span></section>
-  ${rest.length ? html`<section class="story-grid">${rest.map(storyCard)}</section>` : ''}</main>
+  ${stories.length
+    ? html`<section class="shelf-heading feed-heading"><h2>${page.heading}</h2><span>${stories.length === 1 ? '1 story · newest first' : `${stories.length} stories · newest first`}</span></section>
+    <section class="story-feed">${visible.map(storyCard)}</section>${feedTail(remaining, stories.length)}`
+    : emptyFeed()}</main>
   <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Waiting for you</p><div class="rhythm-number">${unreadCount(library().stories)}</div><p>${unreadCount(library().stories) === 1 ? 'story unread' : 'stories unread'}<br>on your shelf</p></div><div class="aside-block"><p class="eyebrow">Following</p><div class="rhythm-number">${library().subscriptions.length}</div><p>${library().subscriptions.length === 1 ? 'blog or newsletter' : 'blogs and newsletters'}<br>you subscribe to</p></div><div class="aside-block aside-note"><span>${icon('rss')}</span><p><strong>${feedStories().length}</strong> from your own subscriptions, <strong>${library().stories.length - feedStories().length}</strong> found by an assistant. Every card says which, because the words in one are the publisher's and in the other a model's.</p></div><div class="aside-block aside-note"><span>${icon('bookmark')}</span><p>Every story keeps its original source, publication date, and a direct path back to the reporting.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Library ready'}</div></aside></div>`;
 }
 
@@ -592,6 +633,26 @@ const viewPolicy = window.trustedTypes?.createPolicy
 function paint(view) {
   if (!(view instanceof SafeHtml)) throw new TypeError('Views must be built with the html template.');
   app.innerHTML = viewPolicy ? viewPolicy.createHTML(view.value, view) : view.value;
+  /* Every paint replaces the node the feed observer was watching, and every view reaches the
+     document through here — so this is the one place that cannot forget to re-attach it. */
+  watchFeedTail();
+}
+
+/**
+ * Extend the feed when the reader arrives at the end of it.
+ *
+ * An observer rather than a scroll listener: the browser says when the tail is near, which
+ * is the one thing a scroll handler has to work out for itself on every frame. The tail is
+ * re-observed after each paint because a paint replaces the node it was watching.
+ */
+let feedTailObserver = null;
+function watchFeedTail() {
+  feedTailObserver?.disconnect();
+  const tail = app.querySelector('[data-role="feed-tail"]');
+  if (!tail || typeof IntersectionObserver !== 'function') return;
+  /* Ahead of the fold, so the next cards are painted before the reader gets to the gap. */
+  feedTailObserver = new IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) growFeed(); }, { rootMargin: '700px 0px' });
+  feedTailObserver.observe(tail);
 }
 
 function render() {
@@ -928,6 +989,8 @@ document.addEventListener('click', async (event) => {
   if (action === 'open-ai') { state.activeFolder = 'ai'; state.view = 'library'; }
   if (action === 'open-account') { state.settingsOpen = false; state.view = 'account'; }
   if (action === 'open-folder') { state.activeFolder = folder; state.view = 'library'; }
+  /* The observer presses this for a reader who is scrolling; the click is the same path. */
+  if (action === 'show-more-stories') { growFeed(); return; }
   if (action === 'open-reader') { state.selectedStoryId = story; state.view = 'reader'; markStoryRead(story).catch(() => {}); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   if (action === 'back-to-library') { state.view = 'library'; state.selectedStoryId = null; }
   if (action === 'increase-font') { updateSettings({ fontScale: Math.min(1.22, Number((settings().fontScale + 0.06).toFixed(2))) }).catch(reportError); }

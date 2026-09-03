@@ -276,9 +276,8 @@ test('every view showing agent-written text says where that text came from', asy
 
   /* One helper builds the label, so a new card cannot quietly ship an unattributed variant. */
   assert.match(code, /function provenanceTag\(record\)/);
-  for (const name of ['storyMeta', 'continueCard']) {
-    assert.match(view(name), /provenanceTag\(/, `${name} renders agent-supplied prose and must attribute it`);
-  }
+  assert.match(view('storyMeta'), /provenanceTag\(/, 'storyMeta renders agent-supplied prose and must attribute it');
+  assert.match(view('storyCard'), /storyMeta\(story\)/, 'the feed card carries its provenance through storyMeta');
 
   /* What the tool asks for and what the app stores must be one number, or a fuller summary
      gets requested and then silently truncated. */
@@ -343,4 +342,37 @@ test('every view showing agent-written text says where that text came from', asy
   assert.match(code, /never fetches or stores article text/);
   assert.equal(/A source-preserved entry from/.test(code), false, 'the dek must not present the summary as the source\'s own entry');
   assert.equal(/12 min read/.test(code), false, 'a read time for a 420-character summary claims text we never had');
+});
+
+test('every shelf is one feed of equal cards that unrolls as the reader reaches its end', async () => {
+  const source = await (await fetch(`${base}/app.js`)).text();
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '');
+  const libraryView = code.slice(code.indexOf('function libraryView()'), code.indexOf('function noteEditor'));
+
+  /* No featured story. Being newest is not a claim to be the one worth reading, and a lead
+     card gave the top of every shelf a size the rest of the shelf could not have. */
+  assert.equal(/continueCard|continue-card|class="continue-/.test(code), false, 'the featured card is gone');
+  assert.equal(/const lead = stories\[0\]/.test(libraryView), false, 'no story may be singled out of the feed');
+  assert.match(libraryView, /storiesForFolder\(\)/);
+  assert.match(libraryView, /class="story-feed">\$\{visible\.map\(storyCard\)\}/, 'the shelf renders one kind of card');
+
+  /* Home, Subscriptions and AI finds differ in what they hold, never in how it is presented:
+     one view builds all three, so a variant cannot appear on one of them alone. */
+  for (const tab of ["tab === 'rss'", "tab === 'ai'"]) {
+    assert.ok(libraryView.includes(tab), `${tab} is still only a difference of copy and contents`);
+  }
+  assert.equal(/function subscriptionsView|function aiView/.test(code), false, 'no tab may grow its own layout');
+
+  /* The feed is unrolled in pages, and the button is the control the observer presses. */
+  assert.match(code, /const FEED_PAGE = \d+/);
+  assert.match(code, /function feedLimit\(\) \{ return state\.feedLimits\[state\.activeFolder\]/, 'how far a shelf is unrolled is per tab');
+  assert.match(code, /data-action="show-more-stories"/, 'reaching the end must be possible without a pointer');
+  assert.match(code, /new IntersectionObserver\(/, 'and it must extend itself on scroll');
+  assert.match(code, /feedTailObserver\?\.disconnect\(\)/, 'each paint replaces the node being observed');
+  const paint = code.slice(code.indexOf('function paint(view)'));
+  assert.match(paint.slice(0, paint.indexOf('\n}')), /watchFeedTail\(\)/, 'so the observer is re-attached by the one sink every view goes through');
+
+  /* Nothing is fetched to grow the feed: the whole library is already decrypted in the page. */
+  const grow = code.slice(code.indexOf('function growFeed()'));
+  assert.equal(/fetch\(|store\.(sync|pull)/.test(grow.slice(0, grow.indexOf('\n}'))), false, 'growing the feed is a render, not a request');
 });
