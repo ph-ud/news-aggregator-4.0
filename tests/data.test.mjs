@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeStories, normalizeCreators, addedByLabel, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
+import { normalizeStories, normalizeCreators, staleStoriesForReplace, staleCreatorsForReplace, addedByLabel, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
 
 test('normalizes agent-supplied news while preserving provenance', () => {
   const stories = normalizeStories('fusion energy', [{ title: 'Fusion update', source: 'Example News', url: 'https://example.com/fusion', publishedAt: '2026-08-26T10:00:00Z', summary: 'A concise update.' }]);
@@ -79,4 +79,33 @@ test('keeps a summary long enough to be worth reading, and trims it at a word bo
 test('falls back to a placeholder rather than dropping a story with no summary', () => {
   const [story] = normalizeStories('fusion', [{ title: 'T', source: 'S', url: 'https://example.com/a' }]);
   assert.equal(story.summary, 'Web research about fusion.');
+});
+
+test('stamps every story with the topic it was injected under', () => {
+  const [story] = normalizeStories('fusion energy', [{ title: 'T', source: 'S', url: 'https://example.com/a' }]);
+  assert.equal(story.topic, 'fusion energy');
+});
+
+test('a replace only drops stale stories from its own topic, never another topic\'s shelf', () => {
+  const existing = [
+    { id: 'a', topic: 'fusion', url: 'https://example.com/old-fusion' },
+    { id: 'b', topic: 'climate', url: 'https://example.com/old-climate' },
+  ];
+  const stale = staleStoriesForReplace(existing, 'fusion', new Set(['https://example.com/new-fusion']));
+  assert.deepEqual(stale.map((story) => story.id), ['a'], 'a fusion replace must never touch the climate shelf');
+});
+
+test('a replace keeps a topic\'s own story when it comes back in the new batch', () => {
+  const existing = [{ id: 'a', topic: 'fusion', url: 'https://example.com/kept' }];
+  const stale = staleStoriesForReplace(existing, 'fusion', new Set(['https://example.com/kept']));
+  assert.deepEqual(stale, []);
+});
+
+test('a creator replace only drops creators discovered for that same topic', () => {
+  const existing = [
+    { id: 'a', discoveredFor: 'urban design' },
+    { id: 'b', discoveredFor: 'space telescopes' },
+  ];
+  const stale = staleCreatorsForReplace(existing, 'urban design');
+  assert.deepEqual(stale.map((creator) => creator.id), ['a']);
 });

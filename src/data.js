@@ -22,6 +22,7 @@ function safeUrl(value) { try { const url = new URL(value); return ['http:', 'ht
 export function normalizeStories(topic, stories) {
   if (!Array.isArray(stories)) return [];
   const seen = new Set();
+  const topicName = asText(topic, 120);
   return stories.slice(0, 10).map((story, index) => {
     const title = asText(story?.title, 240);
     const source = asText(story?.source, 100);
@@ -30,8 +31,17 @@ export function normalizeStories(topic, stories) {
     seen.add(url);
     const published = new Date(story?.publishedAt);
     const tags = Array.isArray(story?.tags) ? [...new Set(story.tags.map((tag) => asText(tag, 40)).filter(Boolean))].slice(0, 3) : [];
-    return { id: randomId(), type: 'story', addedAt: new Date(Date.now() + index).toISOString(), title, source, url, imageUrl: safeUrl(story?.imageUrl), tags, summary: asProse(story?.summary, SUMMARY_LIMIT) || `Web research about ${asText(topic, 120)}.`, publishedAt: Number.isNaN(published.getTime()) ? new Date().toISOString() : published.toISOString(), category: asText(story?.category, 60) || 'Web research', addedBy: 'ChatGPT' };
+    return { id: randomId(), type: 'story', topic: topicName, addedAt: new Date(Date.now() + index).toISOString(), title, source, url, imageUrl: safeUrl(story?.imageUrl), tags, summary: asProse(story?.summary, SUMMARY_LIMIT) || `Web research about ${topicName}.`, publishedAt: Number.isNaN(published.getTime()) ? new Date().toISOString() : published.toISOString(), category: asText(story?.category, 60) || 'Web research', addedBy: 'ChatGPT' };
   }).filter(Boolean);
+}
+
+/**
+ * Stories an `inject-news-to-feed` replace should drop: only the ones on this same topic's
+ * shelf that did not come back in the new batch. A `replace` must never touch another topic's
+ * stories — the whole point of `mode: 'replace'` is refreshing one shelf, not the library.
+ */
+export function staleStoriesForReplace(existingStories, topic, incomingUrls) {
+  return existingStories.filter((story) => story.topic === topic && !incomingUrls.has(story.url));
 }
 
 const CREATOR_KINDS = ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'];
@@ -53,6 +63,12 @@ export function normalizeCreators(topic, creators) {
 }
 
 export function creatorKinds() { return [...CREATOR_KINDS]; }
+
+/** Creators a `discover-creators` replace should drop: only this same topic's, never every creator. */
+export function staleCreatorsForReplace(existingCreators, topic) {
+  const topicName = asText(topic, 120);
+  return existingCreators.filter((creator) => creator.discoveredFor === topicName);
+}
 
 /**
  * Provenance helpers.
