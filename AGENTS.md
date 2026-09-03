@@ -8,7 +8,7 @@ This repository is a WebMCP-powered reading library for the WebMCP Challenge. Ke
 - `src/crypto.js` — the end-to-end encryption primitives: key derivation, master-key wrapping, record encryption.
 - `src/store.js` — the encrypted sync client: sign-in, sync, and the decrypted library the UI reads.
 - `src/keystore.js` — persists the unwrapped master key across reloads as a non-extractable `CryptoKey`.
-- `src/data.js` — normalization, URL validation, deduplication, and source metadata for stories and creators.
+- `src/data.js` — normalization, URL validation, deduplication, provenance, and note helpers.
 - `src/rss.js` — the feed parser (RSS 2.0, Atom, RDF). Pure; it runs in the fetcher script, never in the page.
 - `bin/rss-fetch.mjs` — the local feed fetcher an agent runs on the reader's machine.
 - `src/auth-tools.js` — the WebMCP login tools, kept out of `app.js` so their shape is testable without a browser.
@@ -18,7 +18,7 @@ This repository is a WebMCP-powered reading library for the WebMCP Challenge. Ke
 - `server.mjs` — static file server plus the `/api` mount.
 - `tests/` — crypto unit tests, API integration tests, login-tool tests, passkey and WebAuthn verification tests, and normalization tests for untrusted agent input.
 
-Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; 4.0-reads only receives selected, structured records through `inject-news-to-feed` and `discover-creators`.
+Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; 4.0-reads only receives selected, structured records through `inject-news-to-feed` and `deliver-rss-items`.
 
 ## Two Pipelines, One Shelf
 
@@ -76,6 +76,47 @@ entries they cannot see.
 
 Neither redirect may be silent, and neither may be dropped. "It should not appear here" always
 means *it appears on its own tab*, never *it is discarded*.
+
+## Subscriptions Live in Settings, and There Is No Third Entity
+
+A reader is subscribed to a source or they are not. There used to be a middle state — a
+"creator", researched by an assistant and parked on a Discover page until the reader pressed
+Subscribe — and it was a second record for the same fact, carrying a `feedUrl` that did nothing
+until it became a subscription. It is gone, along with `discover-creators` and the Discover tab.
+
+- **Suggestions belong in the conversation, not in a staging area.** An assistant that has found
+  sources worth following names them to the reader and calls `subscribe-to-source` for the ones
+  they ask for. The consent step did not disappear with the Subscribe button; it moved to where
+  the reader already is. `subscribe-to-source` says so, and says not to subscribe unprompted.
+- **Managing subscriptions is not reading.** The left column is Home, Subscriptions and AI finds
+  — three ways to read a shelf. A list of feeds to administer is a different job, so it lives in
+  the settings dialog, which also holds reading preferences and the account. Mixing them made the
+  column half navigation and half control panel.
+- **The dialog is rendered by `render()` like any other view**, so it passes through the one
+  guarded sink rather than being appended as a detached node. Nothing in it holds text the reader
+  is mid-way through typing, because a repaint rebuilds it.
+
+## Notes
+
+A note is the only text in this library the reader wrote themselves. Everything else is a
+publisher's or a model's, which is why the provenance rules exist; a note needs no such hedging,
+and it is the one record whose loss cannot be repaired by fetching anything again.
+
+- **No assistant reads them.** `get-current-feed` destructures `notes` out before returning, and
+  no tool ships that reads them back. A broad "read the library" call is not consent to hand over
+  the reader's private annotations, and adding one would need to be a deliberate decision with
+  its own tool and its own description saying what it exposes.
+- **Autosave must never re-render.** The editor is a live `<textarea>`; `paint()` rebuilds the
+  entire view, so a render mid-sentence takes the caret and the scroll position with it. The
+  input handler debounces the write and updates the status line in place — the same rule the
+  passphrase form follows, for the same reason. A test asserts no `render()` in that path.
+- **Blur flushes the pending write.** Clicking Back blurs the textarea first, so the `change`
+  handler saves immediately rather than letting the debounce timer lose the last sentence.
+- **Emptying the box deletes the note**, so there is no way to accumulate blank records.
+- **A note outlives its story.** `inject-news-to-feed` with `mode: 'replace'` drops stories the
+  new batch did not carry, and deleting a reader's own words as a side effect of refreshing a
+  shelf would be indefensible. Each note stores the article's title, source, and link when it is
+  written, so an orphaned note still says what it was about and links where it pointed.
 
 ## Fetching Feeds Without a Server
 
@@ -302,7 +343,10 @@ Treat article content and WebMCP tool arguments as untrusted input. Sanitize ren
 
 ## Provenance
 
-Nothing on the shelf was fetched. There is no feed reader and no article scraper: every story and creator arrives as structured JSON from an assistant's web research, and the prose we display — summaries, creator descriptions — is the assistant's, not the publisher's. The link, source name, and publication date point at real reporting; the body text does not come from it.
+No article page is ever fetched. Two things reach the shelf: a subscription's entries, which are
+the publisher's own syndicated text, and an assistant's research, whose prose — the summaries we
+display — is the model's, not the publisher's. In both cases the link, source name, and
+publication date point at real reporting, and in neither case do we hold the article itself.
 
 That makes attribution a correctness requirement, not a courtesy:
 
@@ -314,10 +358,9 @@ That makes attribution a correctness requirement, not a courtesy:
   assistant and the reader page drops the "written by an assistant" notice for one saying this
   is the feed entry as published. What stays true for both: the app never fetches the article
   *page*, and never claims to hold text it does not have.
-- `discover-creators` accepts a `feedUrl`, and it is now load-bearing: it is what the Subscribe
-  button turns into a live subscription. Nothing in the page fetches it even so — the fetch
-  happens on the reader's machine, and `connect-src 'self'` still exists so decrypted content
-  cannot leave the page.
+- A subscription's `feedUrl` is load-bearing: it is what makes the subscription deliver anything.
+  Nothing in the page fetches it even so — the fetch happens on the reader's machine, and
+  `connect-src 'self'` still exists so decrypted content cannot leave the page.
 
 ## Story Quality
 

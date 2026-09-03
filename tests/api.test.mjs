@@ -276,7 +276,7 @@ test('every view showing agent-written text says where that text came from', asy
 
   /* One helper builds the label, so a new card cannot quietly ship an unattributed variant. */
   assert.match(code, /function provenanceTag\(record\)/);
-  for (const name of ['storyMeta', 'continueCard', 'creatorCard']) {
+  for (const name of ['storyMeta', 'continueCard']) {
     assert.match(view(name), /provenanceTag\(/, `${name} renders agent-supplied prose and must attribute it`);
   }
 
@@ -297,6 +297,28 @@ test('every view showing agent-written text says where that text came from', asy
   assert.match(code, /const fromFeed = isFromFeed\(story\)/, 'readerView must know which pipeline it is rendering');
   assert.match(code, /class="article-notice article-notice-rss"/, 'a feed entry needs its own notice');
   assert.match(code, /own feed entry, not a summary of it/, 'and that notice must not call it an assistant\'s summary');
+
+  /* Notes are the reader's own words, and the only record here that no assistant may read. */
+  assert.match(code, /const \{ notes, \.\.\.shared \} = library\(\)/, 'get-current-feed must hold notes back');
+  assert.equal(/execute: async \(\) => \(\{ \.\.\.accountSnapshot\(\), \.\.\.library\(\) \}\)/.test(code), false, 'no tool may return the whole library including notes');
+  assert.equal(/name: 'read-notes'|name: 'get-notes'/.test(code), false, 'no tool reads the reader\'s notes');
+
+  /* The note editor is a live textarea. A render would rebuild it and take the caret. */
+  assert.match(code, /data-role="note-input"/);
+  const noteHandler = code.slice(code.indexOf("const field = event.target.closest('[data-role=\"note-input\"]')"));
+  assert.equal(/render\(\)/.test(noteHandler.slice(0, noteHandler.indexOf('Escape'))), false, 'autosave must not re-render while the reader is typing');
+  assert.match(code, /status\.textContent = 'Saving…'/, 'the indicator is written in place instead');
+
+  /* Creators are gone: a subscription is the only thing a reader follows. */
+  assert.equal(/discover-creators|normalizeCreators|creatorCard|discoverView/.test(code), false, 'the creator staging area was removed');
+  assert.equal(/data-action="open-discover"/.test(code), false, 'and so was its tab');
+
+  /* Managing subscriptions belongs in settings, not in the reading column. */
+  assert.match(code, /function settingsDialog\(\)/);
+  assert.match(code, /role="dialog" aria-modal="true"/, 'the settings pop-up must be a real dialog');
+  assert.match(code, /data-action="open-settings"/);
+  const sidebarView = code.slice(code.indexOf('function sidebar()'), code.indexOf('function provenanceTag'));
+  assert.equal(/data-action="unsubscribe"/.test(sidebarView), false, 'the left column must not manage subscriptions');
 
   /* The Subscriptions tab is the posts from people the reader follows. An injection landing
      there would put a model's summary among them, so the tab filters and the injection moves. */

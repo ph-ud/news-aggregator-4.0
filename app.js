@@ -1,4 +1,4 @@
-import { normalizeStories, normalizeCreators, normalizeFeedItems, normalizeSubscription, sortStoriesByDate, staleStoriesForReplace, staleCreatorsForReplace, withoutFeedDuplicates, subscriptionForFeed, addedByLabel, provenanceLabel, originBadge, isFromFeed, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from './src/data.js';
+import { normalizeStories, normalizeFeedItems, normalizeSubscription, normalizeNote, notesWithArticles, sortStoriesByDate, staleStoriesForReplace, withoutFeedDuplicates, subscriptionForFeed, addedByLabel, provenanceLabel, originBadge, isFromFeed, summaryParagraphs, summaryLength, SUMMARY_LIMIT, NOTE_LIMIT } from './src/data.js';
 import { html, raw, SafeHtml } from './src/html.js';
 import { store } from './src/store.js';
 import { createAuthTools } from './src/auth-tools.js';
@@ -12,6 +12,7 @@ const toastRegion = document.querySelector('#toast-region');
 const state = {
   activeFolder: 'all', view: 'library', selectedStoryId: null, newStoryIds: [],
   authMode: 'signin', authError: '', authBusy: false, authDraft: { name: '', email: '' },
+  settingsOpen: false, settingsSection: 'subscriptions',
   recoveryKey: '', booting: true, webmcp: { supported: false, registered: 0 },
 };
 /* Names already handed to document.modelContext.registerTool(). Tracking this instead of a
@@ -56,6 +57,10 @@ function icon(name) { const icons = {
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4.5" y="10.5" width="15" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg>',
   logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 8 6 12l4 4M6 12h9"/></svg>',
   rss: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 18.5a1 1 0 1 0 0-.01"/><path d="M5 11a8 8 0 0 1 8 8"/><path d="M5 5a14 14 0 0 1 14 14"/></svg>',
+  note: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4.5h14v11l-4 4H5z"/><path d="M19 15.5h-4v4"/><path d="M8.5 9h7M8.5 12.5h4"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.6a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5v.2a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1h.2a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/></svg>',
+  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4.5 7h15M9.5 7V5h5v2M6.5 7l.8 12h9.4l.8-12"/></svg>',
 }; return raw(icons[name] || ''); }
 function toast(message) { const element = document.createElement('div'); element.className = 'toast'; element.textContent = message; toastRegion.append(element); setTimeout(() => element.remove(), 2800); }
 
@@ -163,7 +168,7 @@ async function toggleSave(storyId) {
 
 /**
  * Subscribing is the reader's decision and the only thing that turns a feed on: a feed URL
- * sitting on a discovered creator delivers nothing until this runs. Unsubscribing leaves the
+ * sitting on a source delivers nothing until this runs. Unsubscribing leaves the
  * stories the feed already delivered on the shelf — they were read, saved, and filed like any
  * other, and silently deleting them would be a surprise, not a cleanup.
  */
@@ -212,6 +217,38 @@ async function deliverFeedItems(feedUrl, items) {
   return { subscription, added: fresh.length, skipped: Math.max(0, (Array.isArray(items) ? items.length : 0) - fresh.length) };
 }
 
+/* ---------- notes ---------- */
+
+function noteFor(storyId) { return library().notes.find((entry) => entry.storyId === storyId); }
+
+/**
+ * Write the reader's note for a story, or delete it when they empty the field.
+ *
+ * This is the only text in the library the reader wrote themselves, so it is also the only
+ * record whose loss cannot be undone by fetching anything again. It carries a copy of the
+ * article's title, source, and link: a `replace` can drop the story out from under a note, and
+ * a surviving note that cannot say what it was about is barely a note.
+ *
+ * Nothing here re-renders. The editor is a live textarea the reader is typing into, and a
+ * repaint would rebuild it and take the caret with it — so the caller updates the saved
+ * indicator in place instead.
+ */
+async function saveNote(storyId, text) {
+  requireAccount();
+  const story = library().stories.find((entry) => entry.id === storyId);
+  if (!story) throw new Error('That story is not on your shelf.');
+  const body = normalizeNote(text);
+  const existing = noteFor(storyId);
+  if (!body) { if (existing) await store.remove(existing.id); return { saved: false, deleted: Boolean(existing) }; }
+  const now = new Date().toISOString();
+  const note = await store.put({
+    ...(existing || { type: 'note', storyId, addedAt: now }),
+    text: body, updatedAt: now,
+    storyTitle: story.title, storySource: story.source, storyUrl: story.url,
+  });
+  return { saved: true, note };
+}
+
 async function injectNews(topic, stories, mode = 'replace') {
   requireAccount();
   const supplied = normalizeStories(topic, stories);
@@ -254,22 +291,6 @@ async function injectNews(topic, stories, mode = 'replace') {
   return { topic, tags: [...new Set(enriched.flatMap((story) => story.tagNames))], mode, added: enriched.length, skippedAlreadyInAFeed: supplied.length - normalized.length, feedCount: library().stories.length, via: 'ai', note: 'Stories are on the shelf but not saved yet — the reader saves each one with the Save button. They appear under AI finds and on Home, never on the Subscriptions tab, which holds only entries from feeds the reader subscribed to.' };
 }
 
-async function addCreators(topic, creators, mode = 'append') {
-  requireAccount();
-  const normalized = normalizeCreators(topic, creators);
-  if (!normalized.length) throw new Error('No valid creators were supplied. Each one needs a name and an https URL.');
-  const known = new Set(library().creators.map((creator) => creator.host));
-  const incoming = normalized.filter((creator) => mode === 'replace' || !known.has(creator.host));
-  if (mode === 'replace') {
-    const stale = staleCreatorsForReplace(library().creators, topic);
-    if (stale.length) await store.remove(stale.map((creator) => creator.id));
-  }
-  if (incoming.length) await store.put(incoming);
-  state.view = 'discover'; render();
-  toast(`${incoming.length} ${incoming.length === 1 ? 'creator' : 'creators'} to explore.`);
-  return { topic, mode, added: incoming.length, withFeeds: incoming.filter((creator) => creator.feedUrl).length, creatorCount: library().creators.length, note: 'Nothing is subscribed automatically — the reader subscribes with the Subscribe button, and a creator whose feedUrl you supplied starts delivering once they do.' };
-}
-
 async function updateSettings(patch) {
   await store.put({ id: 'settings', type: 'settings', value: { ...settings(), ...patch } });
   /* The click handler renders synchronously, before this write resolves, so the reader
@@ -283,7 +304,7 @@ function authView() {
   const isSignUp = mode === 'signup';
   const isRecover = mode === 'recover';
   const submitLabel = isSignUp ? 'Create account' : isRecover ? 'Recover account' : 'Sign in';
-  return html`<div class="auth-page"><section class="auth-hero"><a class="brand" href="#" data-action="noop"><span>4.0</span><strong>reads</strong></a><p class="eyebrow">News, blogs, and the people behind them</p><h1>Your shelf<br><em>needs a name.</em></h1><p class="auth-lead">An account keeps your saved stories, your shelves, and everyone you subscribe to in one place — encrypted so that only you can read them.</p><ul class="auth-points"><li>${icon('bookmark')}<span><strong>Save</strong> any story to come back to it.</span></li><li>${icon('bell')}<span><strong>Subscribe</strong> to blogs, newsletters, and independent creators.</span></li><li>${icon('lock')}<span><strong>End-to-end encrypted.</strong> The server stores ciphertext it cannot open.</span></li></ul></section>
+  return html`<div class="auth-page"><section class="auth-hero"><a class="brand" href="#" data-action="noop"><span>4.0</span><strong>reads</strong></a><p class="eyebrow">News, blogs, and the people behind them</p><h1>Your shelf<br><em>needs a name.</em></h1><p class="auth-lead">An account keeps your saved stories, your shelves, and everyone you subscribe to in one place — encrypted so that only you can read them.</p><ul class="auth-points"><li>${icon('bookmark')}<span><strong>Save</strong> any story to come back to it.</span></li><li>${icon('bell')}<span><strong>Subscribe</strong> to blogs, newsletters, and independent writers.</span></li><li>${icon('lock')}<span><strong>End-to-end encrypted.</strong> The server stores ciphertext it cannot open.</span></li></ul></section>
   <section class="auth-panel"><div class="auth-tabs"><button class="${!isSignUp && !isRecover ? 'active' : ''}" data-action="auth-mode" data-mode="signin">Sign in</button><button class="${isSignUp ? 'active' : ''}" data-action="auth-mode" data-mode="signup">Create account</button></div>
   <form class="auth-form" data-form="auth" novalidate>${isSignUp ? html`<label>Name<input name="name" type="text" autocomplete="name" value="${state.authDraft.name}" placeholder="What should we call you?" /></label>` : ''}
   <label>Email<input name="email" type="email" autocomplete="username" required value="${state.authDraft.email}" placeholder="you@example.com" /></label>
@@ -339,14 +360,12 @@ function accountView() {
   <aside class="library-aside"><div class="aside-block aside-note"><span>${icon('lock')}</span><p>The server stores your library as ciphertext it cannot open, and only ever sees a value derived from your passphrase — never the passphrase itself.</p></div></aside></div>`;
 }
 
-function accountChip() { const name = store.profile?.name || 'Reader'; return html`<div class="account-chip"><span class="reader-mark">${initials(name)}</span><button class="account-identity" data-action="open-account" aria-label="Account settings"><strong>${name}</strong><small>${store.profile?.email || ''}</small></button><button data-action="sign-out" aria-label="Sign out">${icon('logout')}</button></div>`; }
+function accountChip() { const name = store.profile?.name || 'Reader'; return html`<div class="account-chip"><span class="reader-mark">${initials(name)}</span><button class="account-identity" data-action="open-settings" aria-label="Open settings"><strong>${name}</strong><small>${store.profile?.email || ''}</small></button><button data-action="open-settings" aria-label="Settings">${icon('gear')}</button><button data-action="sign-out" aria-label="Sign out">${icon('logout')}</button></div>`; }
 function folderRow(folder) { return html`<div class="folder-wrap"><button class="folder ${state.activeFolder === folder.id && state.view === 'library' ? 'active' : ''}" data-action="open-folder" data-folder="${folder.id}">${icon('folder')}<span>${folder.name}</span><b>${folderCount(folder.id)}</b></button><button class="folder-menu" data-action="rename-folder" data-folder="${folder.id}" aria-label="Rename ${folder.name}">${icon('dots')}</button></div>`; }
-function sidebar() { const { stories: feed, saved, folders, subscriptions } = library(); const libraryActive = state.view === 'library'; return html`<aside class="sidebar"><a class="brand" href="#" data-action="open-home"><span>4.0</span><strong>reads</strong></a>
-  <nav class="primary-nav" aria-label="Sections"><button class="nav-link ${libraryActive && state.activeFolder === 'all' ? 'active' : ''}" data-action="open-home">${icon('book')}<span>Home</span><b>${feed.length || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'rss' ? 'active' : ''}" data-action="open-subscriptions">${icon('rss')}<span>Subscriptions</span><b>${feedStories().length || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'ai' ? 'active' : ''}" data-action="open-ai">${icon('sparkle')}<span>AI finds</span><b>${feed.length - feedStories().length || ''}</b></button><button class="nav-link ${state.view === 'discover' ? 'active' : ''}" data-action="open-discover">${icon('compass')}<span>Discover</span><b>${library().creators.length || ''}</b></button></nav>
+function sidebar() { const { stories: feed, saved, folders, notes } = library(); const libraryActive = state.view === 'library'; return html`<aside class="sidebar"><a class="brand" href="#" data-action="open-home"><span>4.0</span><strong>reads</strong></a>
+  <nav class="primary-nav" aria-label="Sections"><button class="nav-link ${libraryActive && state.activeFolder === 'all' ? 'active' : ''}" data-action="open-home">${icon('book')}<span>Home</span><b>${feed.length || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'rss' ? 'active' : ''}" data-action="open-subscriptions">${icon('rss')}<span>Subscriptions</span><b>${feedStories().length || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'ai' ? 'active' : ''}" data-action="open-ai">${icon('sparkle')}<span>AI finds</span><b>${feed.length - feedStories().length || ''}</b></button></nav>
   <div class="library-title"><span>Library</span><button data-action="new-folder" aria-label="Create shelf">${icon('plus')}</button></div>
-  <nav class="library" aria-label="Reading shelves"><button class="folder ${libraryActive && state.activeFolder === 'saved' ? 'active' : ''}" data-action="open-saved">${icon('bookmark')}<span>Saved</span><b>${saved.length}</b></button>${folders.map(folderRow)}</nav>
-  <div class="library-title"><span>Subscriptions</span><b class="count-pill">${subscriptions.length}</b></div>
-  <nav class="library" aria-label="Subscriptions">${subscriptions.length ? subscriptions.slice(0, 6).map((entry) => html`<a class="folder sub-row ${entry.feedUrl ? '' : 'sub-pending'}" href="${safeUrl(entry.url)}" target="_blank" rel="noreferrer">${icon(entry.feedUrl ? 'rss' : 'bellFill')}<span>${entry.name}</span>${entry.feedUrl ? '' : html`<b class="feed-flag" title="No feed URL yet">no feed</b>`}</a>`) : html`<p class="sidebar-empty">Subscribe from any story or creator card.</p>`}</nav>
+  <nav class="library" aria-label="Reading shelves"><button class="folder ${libraryActive && state.activeFolder === 'saved' ? 'active' : ''}" data-action="open-saved">${icon('bookmark')}<span>Saved</span><b>${saved.length}</b></button><button class="folder ${libraryActive && state.activeFolder === 'notes' ? 'active' : ''}" data-action="open-notes">${icon('note')}<span>Notes</span><b>${notes.length}</b></button>${folders.map(folderRow)}</nav>
   <div class="sidebar-spacer"></div>${accountChip()}</aside>`; }
 
 /* Records are researched by an assistant and handed to us; nothing here was fetched from a feed.
@@ -360,7 +379,7 @@ function cover(story, large = false) { const image = storyImage(story); const ma
 function saveButton(story, wide = false) { const saved = isSaved(story.id); return html`<button class="pill-button ${saved ? 'is-on' : ''} ${wide ? 'pill-wide' : ''}" data-action="toggle-save" data-story="${story.id}" aria-pressed="${String(saved)}">${icon(saved ? 'bookmarkFill' : 'bookmark')}<span>${saved ? 'Saved' : 'Save'}</span></button>`; }
 /**
  * Subscribe is the switch that turns a feed on. `feedUrl` rides along on the button because
- * the card is where it is known — a creator the assistant researched carries one, a story
+ * the card is where it is known — a feed entry carries its own, a story
  * card knows only its host — and a subscription made without one is kept as pending rather
  * than refused, then labelled so the reader can see why nothing is arriving from it yet.
  */
@@ -384,6 +403,32 @@ function emptyFeed() {
 function storyCard(story, index) { const isNew = state.newStoryIds.includes(story.id); return html`<article class="story-card ${isNew ? 'story-arriving' : ''} ${isFromFeed(story) ? 'story-rss' : 'story-ai'}" style="--arrival-index:${index}"><button class="cover-button" data-action="open-reader" data-story="${story.id}" aria-label="Open ${story.title}">${cover(story)}</button><div class="story-card-copy"><p class="story-kicker">${story.folderName || story.category || 'Reading'}</p><h3>${story.title}</h3><p class="summary">${story.summary}</p>${storyActions(story)}<footer>${storyMeta(story)}<button class="read-link" data-action="open-reader" data-story="${story.id}">Read ${icon('arrow')}</button></footer></div></article>`; }
 function continueCard(story) { return html`<section class="continue-card"><div class="continue-cover">${cover(story, true)}</div><div class="continue-copy"><p class="eyebrow">Continue reading</p><h2>${story.title}</h2><p class="continue-source">${story.source} <span>·</span> ${date(story.publishedAt)}</p>${provenanceTag(story)}<p class="summary">${story.summary}</p><div class="continue-actions"><button class="primary-button" data-action="open-reader" data-story="${story.id}">Open story ${icon('arrow')}</button>${storyActions(story)}</div></div></section>`; }
 
+/**
+ * Every note beside the article it was written on.
+ *
+ * The article is shown because a note without it is a fragment — "the counts are the whole
+ * argument" means nothing on its own. A note whose story a refresh dropped keeps the title and
+ * link it recorded when it was written, and says so, rather than vanishing with the story.
+ */
+function noteCard(entry, index) {
+  const { note, story, orphaned, title, source, url } = entry;
+  return html`<article class="note-card" style="--arrival-index:${index}"><div class="note-card-head"><p class="story-kicker">${date(note.updatedAt || note.addedAt)}${orphaned ? html` <span>·</span> no longer on your shelf` : ''}</p>
+  ${story ? html`<button class="note-title" data-action="open-reader" data-story="${story.id}">${title}</button>` : html`<span class="note-title note-title-orphan">${title}</span>`}
+  <p class="note-source">${source || 'Unknown source'}${story ? html` ${provenanceTag(story)}` : ''}</p></div>
+  <blockquote class="note-body">${note.text}</blockquote>
+  <div class="card-actions">${story ? html`<button class="pill-button" data-action="open-reader" data-story="${story.id}">${icon('note')}<span>Open and edit</span></button>` : ''}${url ? html`<a class="read-link" href="${safeUrl(url)}" target="_blank" rel="noreferrer">Source ${icon('arrow')}</a>` : ''}<button class="pill-button" data-action="delete-note" data-note="${note.id}">${icon('trash')}<span>Delete</span></button></div></article>`;
+}
+
+function notesView() {
+  const entries = notesWithArticles(library().notes, library().stories);
+  return html`<div class="shell">${sidebar()}<main class="library-main"><header class="topbar"><span>${today()}</span><span class="page-count">${entries.length} ${entries.length === 1 ? 'note' : 'notes'}</span></header>
+  <section class="library-hero"><p class="eyebrow">Notes</p><h1>What you made<br><em>of what you read.</em></h1><p>Every note you have written, with the article it belongs to. Notes are the one thing here you wrote yourself — no assistant is given them.</p></section>
+  ${entries.length
+    ? html`<section class="shelf-heading"><div><p class="eyebrow">Notes</p><h2>In your own words</h2></div><span>Most recent first</span></section><section class="note-grid">${entries.map(noteCard)}</section>`
+    : html`<section class="empty-feed"><div class="empty-book">${icon('note')}</div><p class="eyebrow">No notes yet</p><h2>Write something down.</h2><p>Open any story and use the notes space at the end of it. What you type saves itself and lands here, next to the article it came from.</p><span class="empty-hint">Notes are stored encrypted, like everything else in your library.</span></section>`}</main>
+  <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Notes</p><div class="rhythm-number">${entries.length}</div><p>${entries.length === 1 ? 'note' : 'notes'} written<br>across ${library().stories.length} on your shelf</p></div><div class="aside-block aside-note"><span>${icon('lock')}</span><p>Your notes are held back from <code>get-current-feed</code>. An assistant reading your library does not read these.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Library ready'}</div></aside></div>`;
+}
+
 function libraryView() {
   const stories = storiesForFolder();
   const currentFolder = library().folders.find((folder) => folder.id === state.activeFolder);
@@ -405,18 +450,21 @@ function libraryView() {
   ${lead ? continueCard(lead) : emptyFeed()}
   <section class="shelf-heading"><div><p class="eyebrow">${page.eyebrow}</p><h2>${page.heading}</h2></div><span>${stories.length ? 'Newest first' : 'Nothing here yet'}</span></section>
   ${rest.length ? html`<section class="story-grid">${rest.map(storyCard)}</section>` : ''}</main>
-  <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Reading rhythm</p><div class="rhythm-number">${library().saved.length}</div><p>stories saved<br>from ${library().stories.length} on your shelf</p></div><div class="aside-block"><p class="eyebrow">Following</p><div class="rhythm-number">${library().subscriptions.length}</div><p>${library().subscriptions.length === 1 ? 'blog or creator' : 'blogs and creators'}<br>you subscribe to</p></div><div class="aside-block aside-note"><span>${icon('rss')}</span><p><strong>${feedStories().length}</strong> from your own subscriptions, <strong>${library().stories.length - feedStories().length}</strong> found by an assistant. Every card says which, because the words in one are the publisher's and in the other a model's.</p></div><div class="aside-block aside-note"><span>${icon('bookmark')}</span><p>Every story keeps its original source, publication date, and a direct path back to the reporting.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Library ready'}</div></aside></div>`;
+  <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Reading rhythm</p><div class="rhythm-number">${library().saved.length}</div><p>stories saved<br>from ${library().stories.length} on your shelf</p></div><div class="aside-block"><p class="eyebrow">Following</p><div class="rhythm-number">${library().subscriptions.length}</div><p>${library().subscriptions.length === 1 ? 'blog or newsletter' : 'blogs and newsletters'}<br>you subscribe to</p></div><div class="aside-block aside-note"><span>${icon('rss')}</span><p><strong>${feedStories().length}</strong> from your own subscriptions, <strong>${library().stories.length - feedStories().length}</strong> found by an assistant. Every card says which, because the words in one are the publisher's and in the other a model's.</p></div><div class="aside-block aside-note"><span>${icon('bookmark')}</span><p>Every story keeps its original source, publication date, and a direct path back to the reporting.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Library ready'}</div></aside></div>`;
 }
 
-function creatorCard(creator, index) { return html`<article class="creator-card" style="--arrival-index:${index}"><div class="creator-head"><div class="creator-mark">${initials(creator.name)}</div><div><h3>${creator.name}</h3><p class="creator-host"><em>${creator.kind}</em> <span>·</span> ${hostOf(creator.url) || 'source'}${creator.cadence ? html` <span>·</span> ${creator.cadence}` : ''}</p>${provenanceTag(creator)}</div></div><p class="summary">${creator.description}</p>${creator.whyRelevant ? html`<p class="creator-why">${icon('sparkle')}<span>${creator.whyRelevant}</span></p>` : ''}<div class="creator-topics">${creator.topics.map((topic) => html`<span>${topic}</span>`)}</div><div class="card-actions">${subscribeButton(creator)}<a class="read-link" href="${safeUrl(creator.url)}" target="_blank" rel="noreferrer">Visit ${icon('arrow')}</a></div></article>`; }
-function discoverView() {
-  const { creators, subscriptions } = library();
-  return html`<div class="shell">${sidebar()}<main class="library-main"><header class="topbar"><span>${today()}</span><span class="page-count">${creators.length} ${creators.length === 1 ? 'creator' : 'creators'}</span></header>
-  <section class="library-hero"><p class="eyebrow">Discover</p><h1>Find the people<br><em>worth following.</em></h1><p>Ask your assistant to research blogs, newsletters, and independent creators on a topic. They arrive here with their sources — you decide who to subscribe to.</p></section>
-  ${creators.length ? html`<section class="shelf-heading"><div><p class="eyebrow">Researched for you</p><h2>Blogs &amp; creators</h2></div><span>${subscriptions.length} subscribed</span></section><section class="creator-grid">${creators.map(creatorCard)}</section>` : html`<section class="empty-feed"><div class="empty-book">${icon('compass')}</div><p class="eyebrow">Nothing discovered yet</p><h2>Who should you be reading?</h2><p>Try asking: <em>“find me three independent blogs about urban design”</em>. Results land here through the <code>discover-creators</code> WebMCP tool.</p><span class="empty-hint">The app never fetches or opens the links it is given.</span></section>`}
-  ${subscriptions.length ? html`<section class="shelf-heading"><div><p class="eyebrow">Your subscriptions</p><h2>Following</h2></div><span>${subscriptions.filter((entry) => entry.feedUrl).length} of ${subscriptions.length} with a feed</span></section><section class="sub-grid">${subscriptions.map((entry) => html`<div class="sub-card ${entry.feedUrl ? '' : 'sub-card-pending'}"><div class="creator-mark">${initials(entry.name)}</div><div class="sub-copy"><strong>${entry.name}</strong><small>${entry.host} · since ${date(entry.addedAt)}</small><small class="sub-feed">${entry.feedUrl ? html`${icon('rss')} ${entry.lastFetchedAt ? html`last fetched ${date(entry.lastFetchedAt)}` : 'feed ready — nothing fetched yet'}` : html`No feed URL yet. Ask your assistant to find this site's RSS feed.`}</small></div>${subscribeButton(entry)}</div>`)}</section>` : ''}
-  ${pendingFeeds().length ? html`<section class="feed-help"><p class="eyebrow">${icon('rss')} How your feeds refresh</p><p>4.0-reads cannot fetch a feed from this page — browsers block a site from reading another site's feed, which is why hosted readers fetch on their own servers. This one keeps the fetch on your machine instead, so nothing about who you follow leaves it. Ask your assistant to run <code>node bin/rss-fetch.mjs --feeds -</code> against your subscribed feeds and hand the result back.</p></section>` : ''}</main>
-  <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Following</p><div class="rhythm-number">${subscriptions.length}</div><p>subscriptions saved<br>to ${store.profile.name}'s account</p></div><div class="aside-block aside-note"><span>${icon('sparkle')}</span><p>Discovery is research, not endorsement. Each card keeps the creator's own site so you can judge for yourself.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Discovery ready'}</div></aside></div>`;
+/**
+ * The note space on a story.
+ *
+ * It saves itself as the reader types — no Save button, because a note nobody remembered to
+ * save is worse than no note. The indicator is written in place by the input handler rather
+ * than by a render, since repainting mid-sentence would destroy the caret.
+ */
+function noteEditor(story) {
+  const note = noteFor(story.id);
+  return html`<section class="note-space" data-note-for="${story.id}"><div class="note-head"><h2>${icon('note')}<span>Your notes</span></h2><small data-role="note-status">${note ? `Saved ${date(note.updatedAt || note.addedAt)}` : 'Saves as you type'}</small></div>
+  <textarea class="note-input" data-role="note-input" data-story="${story.id}" rows="5" maxlength="${String(NOTE_LIMIT)}" placeholder="What did you make of this? Notes are yours — they are never sent to an assistant.">${note?.text || ''}</textarea>
+  <p class="note-hint">Kept encrypted with your account and listed under Notes. Emptying the box deletes the note.</p></section>`;
 }
 
 function readerView(story) {
@@ -433,8 +481,66 @@ function readerView(story) {
   ${fromFeed
     ? html`<p class="article-notice article-notice-rss">${icon('rss')}<span>This is ${story.source}'s own feed entry, not a summary of it — whatever they chose to syndicate is what you see here. It may be the whole post or an excerpt; 4.0-reads never fetches the article page — <a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">read it at ${origin}</a>.</span></p>`
     : html`<p class="article-notice">${icon('sparkle')}<span>You are reading a summary written by ${addedByLabel(story)}, not ${story.source}'s article. 4.0-reads never fetches or stores article text — <a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">read the original at ${origin}</a>.</span></p>`}
-  <div class="article-body"><p class="dropcap">${paragraphs[0]}</p>${paragraphs.slice(1).map((paragraph) => html`<p>${paragraph}</p>`)}<h2>Source notes</h2><p>${fromFeed ? html`This entry arrived through your subscription to ${story.source}, fetched from their feed on your own machine and stored encrypted in your account. 4.0-reads keeps what the feed carried — never the article page, which it does not open. Read the full post at ` : html`4.0-reads keeps this story's link, source name, and publication date — never the article body, which it has no way to retrieve. Read the full reporting at `}<a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">${story.source}</a>.</p></div><footer class="article-footer"><button data-action="back-to-library">${icon('back')} Back to shelf</button><a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">Read original ${icon('arrow')}</a></footer></article>
+  <div class="article-body"><p class="dropcap">${paragraphs[0]}</p>${paragraphs.slice(1).map((paragraph) => html`<p>${paragraph}</p>`)}<h2>Source notes</h2><p>${fromFeed ? html`This entry arrived through your subscription to ${story.source}, fetched from their feed on your own machine and stored encrypted in your account. 4.0-reads keeps what the feed carried — never the article page, which it does not open. Read the full post at ` : html`4.0-reads keeps this story's link, source name, and publication date — never the article body, which it has no way to retrieve. Read the full reporting at `}<a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">${story.source}</a>.</p></div>${noteEditor(story)}<footer class="article-footer"><button data-action="back-to-library">${icon('back')} Back to shelf</button><a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">Read original ${icon('arrow')}</a></footer></article>
   <aside class="reader-side"><div class="reader-cover">${cover(story, true)}</div><p class="side-label">Saved in</p><strong>${story.folderName || story.category || 'All stories'}</strong><div class="side-rule"></div><div class="side-actions">${saveButton(story, true)}${subscribeButton({ url: story.url, name: story.source, feedUrl: story.feedUrl || '' }, true)}</div><p class="side-caption">Saving keeps it on ${store.profile.name}'s shelf. ${fromFeed ? html`This came from your subscription to ${hostOf(story.url) || story.source}.` : html`Subscribing follows everything from ${hostOf(story.url) || story.source}.`}</p></aside></div></div>`;
+}
+
+/* ---------- settings ---------- */
+
+/**
+ * The settings dialog: a section list on the left, one panel on the right.
+ *
+ * Managing subscriptions lives here rather than in the reading column. The left column is for
+ * reading — Home, Subscriptions, AI finds — and a list of feeds to administer is a different
+ * job from a shelf of things to read; mixing them made the column half navigation and half
+ * control panel.
+ *
+ * It is rendered as part of the normal view rather than as a detached node, so it goes through
+ * the same one guarded sink as everything else. That means a repaint rebuilds it, which is why
+ * nothing here holds text the reader is mid-way through typing.
+ */
+const SETTINGS_SECTIONS = [
+  { id: 'subscriptions', label: 'Subscriptions', icon: 'rss' },
+  { id: 'reading', label: 'Reading', icon: 'book' },
+  { id: 'account', label: 'Account', icon: 'lock' },
+];
+
+function settingsSubscriptions() {
+  const subs = library().subscriptions;
+  const withFeed = subs.filter((entry) => entry.feedUrl).length;
+  return html`<div class="settings-panel"><header class="settings-head"><h2>Subscriptions</h2><p>${subs.length ? html`${subs.length} ${subs.length === 1 ? 'source' : 'sources'} · ${withFeed} with a feed` : 'Nothing followed yet.'}</p></header>
+  ${subs.length ? html`<ul class="settings-list">${subs.map((entry) => html`<li class="settings-row ${entry.feedUrl ? '' : 'settings-row-pending'}"><span class="creator-mark">${initials(entry.name)}</span>
+    <div class="settings-row-copy"><strong>${entry.name}</strong><small>${entry.host} · ${entry.kind}</small>
+    <small class="sub-feed">${entry.feedUrl ? html`${icon('rss')} ${entry.lastFetchedAt ? html`last fetched ${date(entry.lastFetchedAt)}` : 'feed ready — nothing fetched yet'}` : html`No feed URL yet. Ask your assistant to find this site's feed.`}</small></div>
+    <div class="settings-row-actions"><a class="link-button" href="${safeUrl(entry.url)}" target="_blank" rel="noreferrer">Visit</a><button class="link-button danger" data-action="unsubscribe" data-url="${entry.url}" data-name="${entry.name}">${icon('trash')}<span>Unsubscribe</span></button></div></li>`)}</ul>`
+    : html`<p class="settings-empty">Ask your assistant for blogs or newsletters worth following on a topic. It will name them here in conversation; tell it which ones you want and it subscribes you. Nothing is followed unless you say so.</p>`}
+  <div class="settings-note">${icon('rss')}<p>4.0-reads cannot fetch a feed from this page — a browser will not let one site read another's feed, which is why hosted readers fetch on their own servers. This one keeps the fetch on your machine, so nothing about who you follow leaves it. Ask your assistant to run <code>node bin/rss-fetch.mjs --feeds -</code> and hand the entries back.</p></div>
+  ${subs.length ? html`<p class="settings-fineprint">Unsubscribing stops new entries. Everything a source already delivered stays on your shelf.</p>` : ''}</div>`;
+}
+
+function settingsReading() {
+  const { theme, fontScale } = settings();
+  return html`<div class="settings-panel"><header class="settings-head"><h2>Reading</h2><p>How the reader page looks. Saved with your account, so it follows you between devices.</p></header>
+  <div class="settings-field"><div><strong>Theme</strong><small>Paper or night, on the reading page.</small></div><div class="settings-choice"><button class="pill-button ${theme === 'paper' ? 'is-on' : ''}" data-action="set-theme" data-theme="paper">${icon('sun')}<span>Paper</span></button><button class="pill-button ${theme === 'night' ? 'is-on' : ''}" data-action="set-theme" data-theme="night">${icon('moon')}<span>Night</span></button></div></div>
+  <div class="settings-field"><div><strong>Text size</strong><small>${Math.round(fontScale * 100)}% of the base size.</small></div><div class="settings-choice"><button class="pill-button" data-action="decrease-font">A−</button><button class="pill-button" data-action="increase-font">A+</button></div></div>
+  <div class="settings-field"><div><strong>Your shelf</strong><small>${library().stories.length} ${library().stories.length === 1 ? 'story' : 'stories'} · ${library().saved.length} saved · ${library().notes.length} ${library().notes.length === 1 ? 'note' : 'notes'}</small></div></div></div>`;
+}
+
+function settingsAccount() {
+  return html`<div class="settings-panel"><header class="settings-head"><h2>Account</h2><p>${store.profile.name} · ${store.profile.email}</p></header>
+  <div class="settings-note">${icon('lock')}<p>Your library is encrypted in this page before it is stored. The server keeps ciphertext it cannot open, and only ever sees a value derived from your passphrase — never the passphrase itself, and never your notes.</p></div>
+  <div class="settings-field"><div><strong>Passphrase and passkeys</strong><small>Change your passphrase, or add a passkey to unlock with your device.</small></div><button class="pill-button" data-action="open-account">${icon('lock')}<span>Open security</span></button></div>
+  <div class="settings-field"><div><strong>Sign out</strong><small>Your library stays encrypted on the server. Only your passphrase opens it again.</small></div><button class="pill-button" data-action="sign-out">${icon('logout')}<span>Sign out</span></button></div></div>`;
+}
+
+function settingsDialog() {
+  const section = SETTINGS_SECTIONS.find((entry) => entry.id === state.settingsSection) || SETTINGS_SECTIONS[0];
+  const panel = section.id === 'reading' ? settingsReading() : section.id === 'account' ? settingsAccount() : settingsSubscriptions();
+  return html`<div class="settings-backdrop" data-action="close-settings"><div class="settings-dialog" role="dialog" aria-modal="true" aria-label="Settings">
+    <nav class="settings-nav"><p class="eyebrow">Settings</p>${SETTINGS_SECTIONS.map((entry) => html`<button class="settings-tab ${entry.id === section.id ? 'active' : ''}" data-action="settings-section" data-section="${entry.id}">${icon(entry.icon)}<span>${entry.label}</span></button>`)}</nav>
+    <div class="settings-body">${panel}</div>
+    <button class="settings-close" data-action="close-settings" aria-label="Close settings">${icon('close')}</button>
+  </div></div>`;
 }
 
 /**
@@ -472,10 +578,13 @@ function render() {
     return;
   }
   const story = library().stories.find((entry) => entry.id === state.selectedStoryId);
-  if (state.view === 'reader' && story) paint(readerView(story));
-  else if (state.view === 'discover') paint(discoverView());
-  else if (state.view === 'account') paint(accountView());
-  else { state.view = 'library'; paint(libraryView()); }
+  let view;
+  if (state.view === 'reader' && story) view = readerView(story);
+  else if (state.view === 'account') view = accountView();
+  else if (state.activeFolder === 'notes') { state.view = 'library'; view = notesView(); }
+  else { state.view = 'library'; view = libraryView(); }
+  /* The dialog overlays whatever is behind it and goes through the same single sink. */
+  paint(state.settingsOpen ? html`${view}${settingsDialog()}` : view);
 }
 
 function reportError(error) { toast(error.message); render(); }
@@ -484,8 +593,8 @@ function reportError(error) { toast(error.message); render(); }
 const UNTRUSTED = { untrustedContentHint: true };
 function accountSnapshot() {
   return store.signedIn
-    ? { signedIn: true, needsNewPassphrase: store.needsNewPassphrase, account: { name: store.profile.name, email: store.profile.email }, storyCount: library().stories.length, fromFeedsCount: feedStories().length, foundByAiCount: library().stories.length - feedStories().length, savedCount: library().saved.length, subscriptionCount: library().subscriptions.length, feedsNeedingUrl: pendingFeeds().length, creatorCount: library().creators.length }
-    : { signedIn: false, needsNewPassphrase: false, account: null, storyCount: 0, fromFeedsCount: 0, foundByAiCount: 0, savedCount: 0, subscriptionCount: 0, feedsNeedingUrl: 0, creatorCount: 0 };
+    ? { signedIn: true, needsNewPassphrase: store.needsNewPassphrase, account: { name: store.profile.name, email: store.profile.email }, storyCount: library().stories.length, fromFeedsCount: feedStories().length, foundByAiCount: library().stories.length - feedStories().length, savedCount: library().saved.length, subscriptionCount: library().subscriptions.length, feedsNeedingUrl: pendingFeeds().length, noteCount: library().notes.length }
+    : { signedIn: false, needsNewPassphrase: false, account: null, storyCount: 0, fromFeedsCount: 0, foundByAiCount: 0, savedCount: 0, subscriptionCount: 0, feedsNeedingUrl: 0, noteCount: 0 };
 }
 
 async function registerWebMcpTools() {
@@ -506,9 +615,13 @@ async function registerWebMcpTools() {
       category: { type: 'string', description: 'Short topical label used as the shelf kicker, e.g. "Energy".' },
     }, required: ['title', 'source', 'url', 'summary'], additionalProperties: false } } }, required: ['topic', 'stories'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: true }, execute: async ({ topic, stories, mode = 'replace' }) => injectNews(topic, stories, mode) },
 
-    { name: 'discover-creators', title: 'Suggest blogs and creators to follow', description: 'Add researched blogs, newsletters, podcasts, and independent creators to the reader\'s Discover page. Requires a signed-in account. Favor primary homepages over aggregator profiles, verify the site is still publishing, and say plainly in whyRelevant what makes each one a fit. Nothing is subscribed automatically: the reader presses Subscribe. Always supply feedUrl when the creator publishes an RSS or Atom feed — it is what turns their Subscribe button into a live subscription, and a creator discovered without one can only be followed dormantly until someone finds their feed. mode: "replace" only replaces creators discovered for this exact topic, never the whole Discover page. The app never fetches or opens the links you supply.', inputSchema: { type: 'object', properties: { topic: { type: 'string', maxLength: 120 }, mode: { type: 'string', enum: ['replace', 'append'] }, creators: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' }, feedUrl: { type: 'string' }, handle: { type: 'string' }, kind: { type: 'string', enum: ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'] }, cadence: { type: 'string' }, description: { type: 'string' }, whyRelevant: { type: 'string' }, topics: { type: 'array', maxItems: 4, items: { type: 'string' } } }, required: ['name', 'url'], additionalProperties: false } } }, required: ['topic', 'creators'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: true }, execute: async ({ topic, creators, mode = 'append' }) => addCreators(topic, creators, mode) },
-
-    { name: 'get-current-feed', title: 'Read the 4.0-reads library', description: 'Read the signed-in reader\'s stories, shelves, saved stories, subscriptions, and discovered creators. Read-only. This decrypts in the page, so it works only while the reader is signed in on this device.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, ...UNTRUSTED }, execute: async () => ({ ...accountSnapshot(), ...library() }) },
+    { name: 'get-current-feed', title: 'Read the 4.0-reads library', description: 'Read the signed-in reader\'s stories, shelves, saved stories, and subscriptions. Read-only. The reader\'s own notes are deliberately not included. This decrypts in the page, so it works only while the reader is signed in on this device.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, ...UNTRUSTED }, execute: async () => {
+      /* Notes are the one thing in this library the reader wrote for themselves rather than
+         for anyone to read back. A broad "read the library" call is not consent to hand them
+         over, so they are held back here and no tool ships that reads them. */
+      const { notes, ...shared } = library();
+      return { ...accountSnapshot(), ...shared };
+    } },
 
     { name: 'save-story', title: 'Save a story to the account', description: 'Save a story that is already on the shelf so it stays in the reader\'s Saved list. Requires a signed-in account. Identify the story by its id from get-current-feed, or by its exact url.', inputSchema: { type: 'object', properties: { storyId: { type: 'string' }, url: { type: 'string' } }, additionalProperties: false }, annotations: { destructiveHint: false, idempotentHint: true }, execute: async ({ storyId, url }) => {
       requireAccount();
@@ -520,7 +633,7 @@ async function registerWebMcpTools() {
       return { saved: true, title: story.title, savedCount: library().saved.length };
     } },
 
-    { name: 'subscribe-to-source', title: 'Subscribe to a blog, creator, or source', description: 'Follow a blog, newsletter, or creator in the reader\'s account. Requires a signed-in account. Use the creator\'s own https homepage; one subscription is kept per site. Supply feedUrl whenever you know the site\'s RSS or Atom feed — that is what makes the subscription deliver anything. A subscription without one is kept but stays dormant until attach-feed-url gives it a feed. Subscribing does not fetch: the reader\'s own machine does that, and the entries come back through deliver-rss-items.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' }, feedUrl: { type: 'string', description: 'The site\'s RSS or Atom feed URL, if you know it. The subscription delivers nothing without one.' }, kind: { type: 'string', enum: ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'] }, description: { type: 'string' } }, required: ['name', 'url'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: false, idempotentHint: true }, execute: async ({ name, url, kind = 'blog', description = '', feedUrl = '' }) => {
+    { name: 'subscribe-to-source', title: 'Subscribe to a blog or source', description: 'Follow a blog, newsletter, or publication in the reader\'s account. Requires a signed-in account. Use the source\'s own https homepage; one subscription is kept per site. Subscribing is the reader\'s decision: when you have researched sources worth following, name them in conversation and let the reader choose, then call this for the ones they ask for. Do not subscribe on your own initiative. Supply feedUrl whenever you know the site\'s RSS or Atom feed — that is what makes the subscription deliver anything. A subscription without one is kept but stays dormant until attach-feed-url gives it a feed. Subscribing does not fetch: the reader\'s own machine does that, and the entries come back through deliver-rss-items.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' }, feedUrl: { type: 'string', description: 'The site\'s RSS or Atom feed URL, if you know it. The subscription delivers nothing without one.' }, kind: { type: 'string', enum: ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'] }, description: { type: 'string' } }, required: ['name', 'url'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: false, idempotentHint: true }, execute: async ({ name, url, kind = 'blog', description = '', feedUrl = '' }) => {
       requireAccount();
       if (isSubscribed(url)) { const existing = subscriptionFor(url); return { subscribed: true, alreadySubscribed: true, name: existing.name, feedUrl: existing.feedUrl, needsFeedUrl: !existing.feedUrl }; }
       const result = await toggleSubscription({ name, url, kind, description, feedUrl }); render();
@@ -566,7 +679,7 @@ async function registerWebMcpTools() {
       return { name: subscription.name, feedUrl: subscription.feedUrl, note: 'Nothing is fetched by this app. Fetch the feed on the reader\'s machine and return the entries with deliver-rss-items.' };
     } },
 
-    { name: 'unsubscribe-from-source', title: 'Unsubscribe from a source', description: 'Stop following a blog, newsletter, or creator in the reader\'s account. Requires a signed-in account.', inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'], additionalProperties: false }, annotations: { destructiveHint: true }, execute: async ({ url }) => {
+    { name: 'unsubscribe-from-source', title: 'Unsubscribe from a source', description: 'Stop following a blog, newsletter, or publication in the reader\'s account. Entries it already delivered stay on the shelf. Requires a signed-in account.', inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'], additionalProperties: false }, annotations: { destructiveHint: true }, execute: async ({ url }) => {
       requireAccount();
       if (!isSubscribed(url)) throw new Error('That source is not in your subscriptions.');
       const result = await toggleSubscription({ url, name: '' }); render();
@@ -691,6 +804,49 @@ document.addEventListener('error', (event) => {
   if (image instanceof HTMLImageElement && image.dataset.fallback === 'remove') image.remove();
 }, true);
 
+/**
+ * Autosave for the note editor.
+ *
+ * Debounced so a sentence is one write rather than one per keystroke, and deliberately silent:
+ * no render runs while the reader is typing, because paint() rebuilds the whole view and would
+ * take the caret and the scroll position with it. The status line is updated by hand for the
+ * same reason. A repaint happens only when the reader leaves the page.
+ */
+let noteTimer = null;
+document.addEventListener('input', (event) => {
+  const field = event.target.closest('[data-role="note-input"]');
+  if (!field) return;
+  const status = field.parentElement.querySelector('[data-role="note-status"]');
+  if (status) status.textContent = 'Saving…';
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(async () => {
+    try {
+      const result = await saveNote(field.dataset.story, field.value);
+      if (status) status.textContent = result.saved ? `Saved ${date(new Date().toISOString())}` : 'Note deleted';
+    } catch (error) {
+      if (status) status.textContent = error.message;
+    }
+  }, 600);
+});
+
+/* Escape closes the dialog, as a dialog should. */
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && state.settingsOpen && !rekeyInFlight) { state.settingsOpen = false; render(); }
+});
+
+/* Leaving the field flushes the pending write: clicking Back blurs the textarea first, so a
+   note typed and immediately navigated away from is saved rather than lost with the timer. */
+document.addEventListener('change', async (event) => {
+  const field = event.target.closest('[data-role="note-input"]');
+  if (!field) return;
+  clearTimeout(noteTimer);
+  const status = field.parentElement.querySelector('[data-role="note-status"]');
+  try {
+    const result = await saveNote(field.dataset.story, field.value);
+    if (status) status.textContent = result.saved ? `Saved ${date(new Date().toISOString())}` : 'Note deleted';
+  } catch (error) { if (status) status.textContent = error.message; }
+});
+
 document.addEventListener('change', (event) => {
   const box = event.target.closest('[data-action="confirm-recovery"]');
   if (!box) return;
@@ -721,12 +877,28 @@ document.addEventListener('click', async (event) => {
   if (action === 'finish-recovery') { state.recoveryKey = ''; state.view = 'library'; toast(`Welcome, ${store.profile.name}.`); render(); return; }
   if (action === 'sign-out') { await signOut(); toast('Signed out. Your library stays encrypted on the server.'); return; }
 
+  if (action === 'open-settings') { state.settingsOpen = true; render(); return; }
+  /* Only the backdrop itself closes, never a click that bubbled up from inside the dialog. */
+  if (action === 'close-settings' && (event.target === button || button.classList.contains('settings-close'))) { state.settingsOpen = false; render(); return; }
+  if (action === 'settings-section') { state.settingsSection = button.dataset.section; render(); return; }
+  if (action === 'set-theme') { updateSettings({ theme: button.dataset.theme }).catch(reportError); return; }
+  if (action === 'unsubscribe') {
+    try { const result = await toggleSubscription({ url, name }); toast(`Unsubscribed from ${result.subscription.name}. Everything it already sent stays on your shelf.`); }
+    catch (error) { toast(error.message); }
+    render(); return;
+  }
+
   if (action === 'open-home') { event.preventDefault(); state.activeFolder = 'all'; state.view = 'library'; }
   if (action === 'open-saved') { state.activeFolder = 'saved'; state.view = 'library'; }
+  if (action === 'open-notes') { state.activeFolder = 'notes'; state.view = 'library'; }
+  if (action === 'delete-note') {
+    try { await store.remove(button.dataset.note); toast('Note deleted.'); }
+    catch (error) { toast(error.message); }
+    render(); return;
+  }
   if (action === 'open-subscriptions') { state.activeFolder = 'rss'; state.view = 'library'; }
   if (action === 'open-ai') { state.activeFolder = 'ai'; state.view = 'library'; }
-  if (action === 'open-discover') { state.view = 'discover'; }
-  if (action === 'open-account') { state.view = 'account'; }
+  if (action === 'open-account') { state.settingsOpen = false; state.view = 'account'; }
   if (action === 'open-folder') { state.activeFolder = folder; state.view = 'library'; }
   if (action === 'open-reader') { state.selectedStoryId = story; state.view = 'reader'; window.scrollTo({ top: 0, behavior: 'smooth' }); }
   if (action === 'back-to-library') { state.view = 'library'; state.selectedStoryId = null; }

@@ -180,25 +180,14 @@ export function withoutFeedDuplicates(stories, existingStories) {
   return stories.filter((story) => !fromFeeds.has(story.url));
 }
 
-const CREATOR_KINDS = ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'];
+/**
+ * The kinds a subscription can be. A reader following a podcast and a reader following a
+ * newsletter want the same thing from this app — entries in a list — so the kind is a label
+ * on the card, never a branch in the code.
+ */
+const SOURCE_KINDS = ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'];
 
-export function normalizeCreators(topic, creators) {
-  if (!Array.isArray(creators)) return [];
-  const seen = new Set();
-  return creators.slice(0, 12).map((creator, index) => {
-    const name = asText(creator?.name, 120);
-    const url = safeUrl(creator?.url);
-    if (!name || !url) return null;
-    const dedupeKey = (() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; } })();
-    if (seen.has(dedupeKey)) return null;
-    seen.add(dedupeKey);
-    const kindValue = asText(creator?.kind, 20).toLocaleLowerCase();
-    const topics = Array.isArray(creator?.topics) ? [...new Set(creator.topics.map((entry) => asText(entry, 40)).filter(Boolean))].slice(0, 4) : [];
-    return { id: randomId(), type: 'creator', host: dedupeKey, addedAt: new Date(Date.now() + index).toISOString(), name, url, feedUrl: safeUrl(creator?.feedUrl), handle: asText(creator?.handle, 60), kind: CREATOR_KINDS.includes(kindValue) ? kindValue : 'blog', topics: topics.length ? topics : [asText(topic, 40) || 'Discovery'], cadence: asText(creator?.cadence, 60), description: asProse(creator?.description, 420) || `An independent ${kindValue || 'blog'} covering ${asText(topic, 120) || 'your interests'}.`, whyRelevant: asText(creator?.whyRelevant, 280), discoveredAt: new Date().toISOString(), discoveredFor: asText(topic, 120), addedBy: 'ChatGPT', rank: index };
-  }).filter(Boolean);
-}
-
-export function creatorKinds() { return [...CREATOR_KINDS]; }
+export function sourceKinds() { return [...SOURCE_KINDS]; }
 
 /**
  * A subscription record.
@@ -220,25 +209,57 @@ export function normalizeSubscription({ name, url, host, kind = 'blog', descript
     name: asText(name, 60) || siteHost,
     url: safeSite, feedUrl: feed,
     feedStatus: feed ? 'active' : 'pending',
-    kind: CREATOR_KINDS.includes(kindValue) ? kindValue : 'blog',
+    kind: SOURCE_KINDS.includes(kindValue) ? kindValue : 'blog',
     description: asProse(description, 420),
     addedAt: new Date().toISOString(), lastFetchedAt: '', itemCount: 0,
   };
 }
 
-/** Creators a `discover-creators` replace should drop: only this same topic's, never every creator. */
-export function staleCreatorsForReplace(existingCreators, topic) {
-  const topicName = asText(topic, 120);
-  return existingCreators.filter((creator) => creator.discoveredFor === topicName);
+/**
+ * Notes.
+ *
+ * A note is the only text in this library the reader wrote themselves. Everything else is a
+ * publisher's or a model's, which is why the provenance rules exist; a note needs no such
+ * hedging, and it is the one record whose loss cannot be repaired by fetching anything again.
+ */
+export const NOTE_LIMIT = 4000;
+
+/** Trimmed and capped. An empty note is not a note — the caller deletes the record instead. */
+export function normalizeNote(text) { return typeof text === 'string' ? text.trim().slice(0, NOTE_LIMIT) : ''; }
+
+/**
+ * Every note beside the article it belongs to, newest first.
+ *
+ * A note can outlive its story: `inject-news-to-feed` with `mode: 'replace'` drops stories the
+ * new batch did not carry, and a reader who annotated one of them still wrote that sentence.
+ * Deleting their words as a side effect of refreshing a shelf would be indefensible, so the
+ * pairing keeps the orphan and reports what it knows — the note itself, and whatever the note
+ * recorded about the article when it was written.
+ */
+export function notesWithArticles(notes, stories) {
+  const byId = new Map((stories || []).map((story) => [story.id, story]));
+  return (notes || [])
+    .filter((note) => normalizeNote(note?.text))
+    .map((note) => {
+      const story = byId.get(note.storyId) || null;
+      return {
+        note, story,
+        orphaned: !story,
+        title: story?.title || note.storyTitle || 'A story no longer on the shelf',
+        source: story?.source || note.storySource || '',
+        url: story?.url || note.storyUrl || '',
+      };
+    })
+    .sort((a, b) => String(b.note.updatedAt || b.note.addedAt || '').localeCompare(String(a.note.updatedAt || a.note.addedAt || '')));
 }
 
 /**
  * Provenance helpers.
  *
- * Nothing on the shelf was fetched: there is no feed reader and no article scraper here. Every
- * story and creator arrives as structured JSON from an assistant's web research, and the prose
- * we display — summaries, descriptions — is the assistant's, not the publisher's. Views must say
- * so, so the wording lives here where it is pure and testable rather than inline in a template.
+ * An AI story is never fetched: it arrives as structured JSON from an assistant's web research,
+ * and the prose we display is the assistant's, not the publisher's. A feed entry is the
+ * publisher's own syndicated text. Views must say which, so the wording lives here where it is
+ * pure and testable rather than inline in a template.
  */
 export function addedByLabel(record) { return asText(record?.addedBy, 60) || 'an assistant'; }
 

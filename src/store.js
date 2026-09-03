@@ -2,8 +2,8 @@ import { normalizeRecoveryKey, deriveKeys, deriveRecoveryAuth, newSalt, newMaste
 import { enrollPasskey, unlockWithPasskey } from './passkeys.js';
 import { rememberKey, recallKey, forgetKeys } from './keystore.js';
 
-const TYPES = { story: 'stories', creator: 'creators', subscription: 'subscriptions', folder: 'folders', saved: 'saved' };
-const emptyLibrary = () => ({ stories: [], creators: [], subscriptions: [], folders: [], saved: [], settings: { theme: 'paper', fontScale: 1 } });
+const TYPES = { story: 'stories', subscription: 'subscriptions', folder: 'folders', saved: 'saved', note: 'notes' };
+const emptyLibrary = () => ({ stories: [], subscriptions: [], folders: [], saved: [], notes: [], settings: { theme: 'paper', fontScale: 1 } });
 
 async function api(path, { method = 'GET', body } = {}) {
   const response = await fetch(path, {
@@ -205,7 +205,10 @@ export const store = {
       const bucket = TYPES[record.type];
       if (bucket) library[bucket].push(record);
     }
-    for (const key of ['stories', 'creators', 'subscriptions', 'saved']) library[key].sort((a, b) => String(b.addedAt || '').localeCompare(String(a.addedAt || '')));
+    for (const key of ['stories', 'subscriptions', 'saved']) library[key].sort((a, b) => String(b.addedAt || '').localeCompare(String(a.addedAt || '')));
+    /* Notes sort by when they were last written, not when they were started: a note the reader
+       came back to and expanded is the one they are working on. */
+    library.notes.sort((a, b) => String(b.updatedAt || b.addedAt || '').localeCompare(String(a.updatedAt || a.addedAt || '')));
     this.library = library;
   },
 };

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeStories, normalizeCreators, normalizeFeedItems, normalizeSubscription, sortStoriesByDate, staleStoriesForReplace, staleCreatorsForReplace, withoutFeedDuplicates, subscriptionForFeed, originOf, isFromFeed, addedByLabel, provenanceLabel, originBadge, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
+import { normalizeStories, normalizeFeedItems, normalizeSubscription, normalizeNote, notesWithArticles, NOTE_LIMIT, sortStoriesByDate, staleStoriesForReplace, withoutFeedDuplicates, subscriptionForFeed, originOf, isFromFeed, addedByLabel, provenanceLabel, originBadge, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
 
 test('normalizes agent-supplied news while preserving provenance', () => {
   const stories = normalizeStories('fusion energy', [{ title: 'Fusion update', source: 'Example News', url: 'https://example.com/fusion', publishedAt: '2026-08-26T10:00:00Z', summary: 'A concise update.' }]);
@@ -15,28 +15,6 @@ test('rejects invalid URLs and deduplicates by URL', () => {
   assert.equal(stories[0].title, 'Good');
 });
 
-test('normalizes discovered creators and deduplicates by host', () => {
-  const creators = normalizeCreators('urban design', [
-    { name: 'Street Notes', url: 'https://streetnotes.example/blog', kind: 'newsletter', cadence: 'Weekly', topics: ['cities', 'transit'], whyRelevant: 'Primary reporting on street redesigns.' },
-    { name: 'Street Notes mirror', url: 'https://www.streetnotes.example/feed' },
-    { name: 'No URL' },
-  ]);
-  assert.equal(creators.length, 1);
-  assert.equal(creators[0].kind, 'newsletter');
-  assert.deepEqual(creators[0].topics, ['cities', 'transit']);
-  assert.equal(creators[0].addedBy, 'ChatGPT');
-});
-
-test('falls back to a safe kind and rejects unsafe creator URLs', () => {
-  const creators = normalizeCreators('design', [
-    { name: 'Bad protocol', url: 'javascript:alert(1)' },
-    { name: 'Odd kind', url: 'https://example.com/writing', kind: 'telepathy', feedUrl: 'javascript:alert(1)' },
-  ]);
-  assert.equal(creators.length, 1);
-  assert.equal(creators[0].kind, 'blog');
-  assert.equal(creators[0].feedUrl, '');
-  assert.deepEqual(creators[0].topics, ['design']);
-});
 
 test('names the agent that supplied a record, and never leaves it unattributed', () => {
   const [story] = normalizeStories('topic', [{ title: 'T', source: 'S', url: 'https://example.com/a' }]);
@@ -99,15 +77,6 @@ test('a replace keeps a topic\'s own story when it comes back in the new batch',
   const existing = [{ id: 'a', topic: 'fusion', url: 'https://example.com/kept' }];
   const stale = staleStoriesForReplace(existing, 'fusion', new Set(['https://example.com/kept']));
   assert.deepEqual(stale, []);
-});
-
-test('a creator replace only drops creators discovered for that same topic', () => {
-  const existing = [
-    { id: 'a', discoveredFor: 'urban design' },
-    { id: 'b', discoveredFor: 'space telescopes' },
-  ];
-  const stale = staleCreatorsForReplace(existing, 'urban design');
-  assert.deepEqual(stale.map((creator) => creator.id), ['a']);
 });
 
 /* ---------- RSS: the origin distinction, and the enforcement behind it ---------- */
@@ -275,4 +244,45 @@ test('the Subscriptions tab can only ever hold feed entries', () => {
   /* And AI finds is its complement, so nothing can fall between the two tabs. */
   assert.deepEqual(sortStoriesByDate(shelf.filter((s) => !isFromFeed(s))).map((s) => s.id), ['legacy', 'ai-1']);
   assert.equal(shelf.filter(isFromFeed).length + shelf.filter((s) => !isFromFeed(s)).length, shelf.length);
+});
+
+/* ---------- notes ---------- */
+
+test('trims and caps a note, and treats an empty one as no note', () => {
+  assert.equal(normalizeNote('  a thought  '), 'a thought');
+  assert.equal(normalizeNote('   '), '', 'whitespace is not a note; the caller deletes the record');
+  assert.equal(normalizeNote(undefined), '');
+  assert.equal(normalizeNote(42), '');
+  assert.equal(normalizeNote('x'.repeat(NOTE_LIMIT + 500)).length, NOTE_LIMIT);
+});
+
+test('pairs every note with the article it was written on, newest first', () => {
+  const stories = [{ id: 's1', title: 'Bus lanes', source: 'Street Notes', url: 'https://streetnotes.example/bus' }];
+  const notes = [
+    { id: 'n1', storyId: 's1', text: 'The counts are the whole argument.', updatedAt: '2026-09-01T00:00:00Z' },
+    { id: 'n2', storyId: 's1', text: 'Later thought.', updatedAt: '2026-09-03T00:00:00Z' },
+  ];
+  const paired = notesWithArticles(notes, stories);
+  assert.deepEqual(paired.map((entry) => entry.note.id), ['n2', 'n1']);
+  assert.equal(paired[0].title, 'Bus lanes');
+  assert.equal(paired[0].orphaned, false);
+});
+
+test('keeps a note whose story a replace dropped, using what the note recorded', () => {
+  /* Deleting the reader's own words as a side effect of refreshing a shelf is indefensible;
+     a surviving note that cannot say what it was about is barely a note either. */
+  const notes = [{ id: 'n1', storyId: 'gone', text: 'Worth revisiting.', storyTitle: 'Reactor milestone', storySource: 'Example News', storyUrl: 'https://example.com/a', updatedAt: '2026-09-02T00:00:00Z' }];
+  const [entry] = notesWithArticles(notes, []);
+  assert.equal(entry.orphaned, true);
+  assert.equal(entry.title, 'Reactor milestone');
+  assert.equal(entry.source, 'Example News');
+  assert.equal(entry.url, 'https://example.com/a');
+  assert.equal(entry.story, null);
+});
+
+test('an orphan with nothing recorded still says what it is, and blank notes are dropped', () => {
+  const [entry] = notesWithArticles([{ id: 'n1', storyId: 'gone', text: 'A thought.' }], []);
+  assert.equal(entry.title, 'A story no longer on the shelf');
+  assert.deepEqual(notesWithArticles([{ id: 'n2', storyId: 's1', text: '   ' }], []), []);
+  assert.deepEqual(notesWithArticles(undefined, undefined), []);
 });
