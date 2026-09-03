@@ -298,6 +298,14 @@ test('every view showing agent-written text says where that text came from', asy
   assert.match(code, /class="article-notice article-notice-rss"/, 'a feed entry needs its own notice');
   assert.match(code, /own feed entry, not a summary of it/, 'and that notice must not call it an assistant\'s summary');
 
+  /* Badges count what is waiting, not what is there. A total is visible by looking at the shelf. */
+  assert.match(code, /function folderCount\(id\) \{ return unreadCount\(/, 'shelf badges count unread');
+  assert.equal(/<b>\$\{feed\.length/.test(code), false, 'no nav badge may show a total');
+  assert.equal(/<b>\$\{saved\.length\}<\/b>/.test(code), false, 'nor may Saved');
+  assert.match(code, /markStoryRead\(story\)\.catch/, 'opening a story marks it read');
+  const markRead = code.slice(code.indexOf('async function markStoryRead'));
+  assert.equal(/render\(\)/.test(markRead.slice(0, markRead.indexOf('}'))), false, 'marking read must not repaint the reader');
+
   /* Notes are the reader's own words, and the only record here that no assistant may read. */
   assert.match(code, /const \{ notes, \.\.\.shared \} = library\(\)/, 'get-current-feed must hold notes back');
   assert.equal(/execute: async \(\) => \(\{ \.\.\.accountSnapshot\(\), \.\.\.library\(\) \}\)/.test(code), false, 'no tool may return the whole library including notes');

@@ -1,4 +1,4 @@
-import { normalizeStories, normalizeFeedItems, normalizeSubscription, normalizeNote, notesWithArticles, sortStoriesByDate, staleStoriesForReplace, withoutFeedDuplicates, subscriptionForFeed, addedByLabel, provenanceLabel, originBadge, isFromFeed, summaryParagraphs, summaryLength, SUMMARY_LIMIT, NOTE_LIMIT } from './src/data.js';
+import { normalizeStories, normalizeFeedItems, normalizeSubscription, normalizeNote, notesWithArticles, sortStoriesByDate, staleStoriesForReplace, withoutFeedDuplicates, subscriptionForFeed, addedByLabel, provenanceLabel, originBadge, isFromFeed, isUnread, unreadCount, summaryParagraphs, summaryLength, SUMMARY_LIMIT, NOTE_LIMIT } from './src/data.js';
 import { html, raw, SafeHtml } from './src/html.js';
 import { store } from './src/store.js';
 import { createAuthTools } from './src/auth-tools.js';
@@ -150,7 +150,8 @@ function storiesForFolder() {
 }
 function feedStories() { return library().stories.filter(isFromFeed); }
 function pendingFeeds() { return library().subscriptions.filter((entry) => !entry.feedUrl); }
-function folderCount(id) { return library().stories.filter((story) => (story.tagIds || []).includes(id)).length; }
+/* Unread on that shelf, matching every other badge in the column. */
+function folderCount(id) { return unreadCount(library().stories.filter((story) => (story.tagIds || []).includes(id))); }
 function savedFor(storyId) { return library().saved.find((entry) => entry.storyId === storyId); }
 function isSaved(storyId) { return Boolean(savedFor(storyId)); }
 function subscriptionFor(url) { const host = hostOf(url); return library().subscriptions.find((entry) => entry.host === host); }
@@ -215,6 +216,21 @@ async function deliverFeedItems(feedUrl, items) {
     setTimeout(() => { state.newStoryIds = []; render(); }, 900);
   }
   return { subscription, added: fresh.length, skipped: Math.max(0, (Array.isArray(items) ? items.length : 0) - fresh.length) };
+}
+
+/**
+ * Opening a story marks it read.
+ *
+ * Written without a re-render on purpose: the reader page has no sidebar, so no badge on
+ * screen is stale, and repainting would rebuild the note editor underneath the reader. The
+ * counts catch up when they go back. A failed write must not stop anyone reading, so this is
+ * fire-and-forget.
+ */
+async function markStoryRead(storyId) {
+  if (!store.signedIn) return;
+  const story = library().stories.find((entry) => entry.id === storyId);
+  if (!story || story.readAt) return;
+  await store.put({ ...story, readAt: new Date().toISOString() });
 }
 
 /* ---------- notes ---------- */
@@ -363,11 +379,20 @@ function accountView() {
 /* Three children, matching the three grid columns: a fourth wraps onto a row of its own. The
    settings entry is a nav row above instead, where a settings entry belongs. */
 function accountChip() { const name = store.profile?.name || 'Reader'; return html`<div class="account-chip"><span class="reader-mark">${initials(name)}</span><button class="account-identity" data-action="open-settings" data-section="account" aria-label="Your account"><strong>${name}</strong><small>${store.profile?.email || ''}</small></button><button data-action="sign-out" aria-label="Sign out">${icon('logout')}</button></div>`; }
-function folderRow(folder) { return html`<div class="folder-wrap"><button class="folder ${state.activeFolder === folder.id && state.view === 'library' ? 'active' : ''}" data-action="open-folder" data-folder="${folder.id}">${icon('folder')}<span>${folder.name}</span><b>${folderCount(folder.id)}</b></button><button class="folder-menu" data-action="rename-folder" data-folder="${folder.id}" aria-label="Rename ${folder.name}">${icon('dots')}</button></div>`; }
-function sidebar() { const { stories: feed, saved, folders, notes } = library(); const libraryActive = state.view === 'library'; return html`<aside class="sidebar"><a class="brand" href="#" data-action="open-home"><span>4.0</span><strong>reads</strong></a>
-  <nav class="primary-nav" aria-label="Sections"><button class="nav-link ${libraryActive && state.activeFolder === 'all' ? 'active' : ''}" data-action="open-home">${icon('book')}<span>Home</span><b>${feed.length || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'rss' ? 'active' : ''}" data-action="open-subscriptions">${icon('rss')}<span>Subscriptions</span><b>${feedStories().length || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'ai' ? 'active' : ''}" data-action="open-ai">${icon('sparkle')}<span>AI finds</span><b>${feed.length - feedStories().length || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'notes' ? 'active' : ''}" data-action="open-notes">${icon('note')}<span>Notes</span><b>${notes.length || ''}</b></button></nav>
+function folderRow(folder) { return html`<div class="folder-wrap"><button class="folder ${state.activeFolder === folder.id && state.view === 'library' ? 'active' : ''}" data-action="open-folder" data-folder="${folder.id}">${icon('folder')}<span>${folder.name}</span><b class="unread-badge">${folderCount(folder.id) || ''}</b></button><button class="folder-menu" data-action="rename-folder" data-folder="${folder.id}" aria-label="Rename ${folder.name}">${icon('dots')}</button></div>`; }
+/* Badges count what is waiting, never what is there: a total is something the reader can see
+   by looking at the shelf. Zero unread shows nothing at all, as a badge should. */
+function sidebar() {
+  const { stories: feed, saved, folders, notes } = library();
+  const libraryActive = state.view === 'library';
+  const fromFeeds = feed.filter(isFromFeed);
+  const unread = { all: unreadCount(feed), rss: unreadCount(fromFeeds), ai: unreadCount(feed.filter((story) => !isFromFeed(story))) };
+  const savedIds = new Set(saved.map((entry) => entry.storyId));
+  const unreadSaved = unreadCount(feed.filter((story) => savedIds.has(story.id)));
+  return html`<aside class="sidebar"><a class="brand" href="#" data-action="open-home"><span>4.0</span><strong>reads</strong></a>
+  <nav class="primary-nav" aria-label="Sections"><button class="nav-link ${libraryActive && state.activeFolder === 'all' ? 'active' : ''}" data-action="open-home">${icon('book')}<span>Home</span><b class="unread-badge">${unread.all || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'rss' ? 'active' : ''}" data-action="open-subscriptions">${icon('rss')}<span>Subscriptions</span><b class="unread-badge">${unread.rss || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'ai' ? 'active' : ''}" data-action="open-ai">${icon('sparkle')}<span>AI finds</span><b class="unread-badge">${unread.ai || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'notes' ? 'active' : ''}" data-action="open-notes">${icon('note')}<span>Notes</span><b class="unread-badge"></b></button></nav>
   <div class="library-title"><span>Library</span><button data-action="new-folder" aria-label="Create shelf">${icon('plus')}</button></div>
-  <nav class="library" aria-label="Reading shelves"><button class="folder ${libraryActive && state.activeFolder === 'saved' ? 'active' : ''}" data-action="open-saved">${icon('bookmark')}<span>Saved</span><b>${saved.length}</b></button>${folders.map(folderRow)}</nav>
+  <nav class="library" aria-label="Reading shelves"><button class="folder ${libraryActive && state.activeFolder === 'saved' ? 'active' : ''}" data-action="open-saved">${icon('bookmark')}<span>Saved</span><b class="unread-badge">${unreadSaved || ''}</b></button>${folders.map(folderRow)}</nav>
   <div class="sidebar-spacer"></div>
   <nav class="sidebar-footer" aria-label="Settings"><button class="folder ${state.settingsOpen ? 'active' : ''}" data-action="open-settings">${icon('gear')}<span>Settings</span></button></nav>${accountChip()}</aside>`; }
 
@@ -403,8 +428,8 @@ function emptyFeed() {
   if (state.activeFolder === 'ai') return html`<section class="empty-feed"><div class="empty-book">${icon('sparkle')}</div><p class="eyebrow">Nothing researched yet</p><h2>Ask for news on a topic.</h2><p>Try asking: <em>“what happened in fusion energy this week?”</em>. Results land here through the <code>inject-news-to-feed</code> tool, as summaries an assistant wrote — never as the publisher's own words.</p><span class="empty-hint">The app never fetches or opens the article links it is given.</span></section>`;
   return html`<section class="empty-feed"><div class="empty-book">${icon('book')}</div><p class="eyebrow">A blank first page</p><h2>Subscribe to someone worth reading.</h2><p>Two things fill this shelf: feeds you subscribe to, which arrive as the publisher wrote them, and stories an assistant researches for you, which arrive as its summaries. Head to Discover to find people to follow, or ask for news on a topic.</p><span class="empty-hint">Every card says which of the two it is.</span></section>`;
 }
-function storyCard(story, index) { const isNew = state.newStoryIds.includes(story.id); return html`<article class="story-card ${isNew ? 'story-arriving' : ''} ${isFromFeed(story) ? 'story-rss' : 'story-ai'}" style="--arrival-index:${index}"><button class="cover-button" data-action="open-reader" data-story="${story.id}" aria-label="Open ${story.title}">${cover(story)}</button><div class="story-card-copy"><p class="story-kicker">${story.folderName || story.category || 'Reading'}</p><h3>${story.title}</h3><p class="summary">${story.summary}</p>${storyActions(story)}<footer>${storyMeta(story)}<button class="read-link" data-action="open-reader" data-story="${story.id}">Read ${icon('arrow')}</button></footer></div></article>`; }
-function continueCard(story) { return html`<section class="continue-card"><div class="continue-cover">${cover(story, true)}</div><div class="continue-copy"><p class="eyebrow">Continue reading</p><h2>${story.title}</h2><p class="continue-source">${story.source} <span>·</span> ${date(story.publishedAt)}</p>${provenanceTag(story)}<p class="summary">${story.summary}</p><div class="continue-actions"><button class="primary-button" data-action="open-reader" data-story="${story.id}">Open story ${icon('arrow')}</button>${storyActions(story)}</div></div></section>`; }
+function storyCard(story, index) { const isNew = state.newStoryIds.includes(story.id); return html`<article class="story-card ${isNew ? 'story-arriving' : ''} ${isFromFeed(story) ? 'story-rss' : 'story-ai'} ${isUnread(story) ? 'is-unread' : 'is-read'}" style="--arrival-index:${index}"><button class="cover-button" data-action="open-reader" data-story="${story.id}" aria-label="Open ${story.title}">${cover(story)}</button><div class="story-card-copy"><p class="story-kicker">${story.folderName || story.category || 'Reading'}</p><h3>${story.title}</h3><p class="summary">${story.summary}</p>${storyActions(story)}<footer>${storyMeta(story)}<button class="read-link" data-action="open-reader" data-story="${story.id}">Read ${icon('arrow')}</button></footer></div></article>`; }
+function continueCard(story) { return html`<section class="continue-card ${isUnread(story) ? 'is-unread' : 'is-read'}"><div class="continue-cover">${cover(story, true)}</div><div class="continue-copy"><p class="eyebrow">Continue reading</p><h2>${story.title}</h2><p class="continue-source">${story.source} <span>·</span> ${date(story.publishedAt)}</p>${provenanceTag(story)}<p class="summary">${story.summary}</p><div class="continue-actions"><button class="primary-button" data-action="open-reader" data-story="${story.id}">Open story ${icon('arrow')}</button>${storyActions(story)}</div></div></section>`; }
 
 /**
  * Every note beside the article it was written on.
@@ -424,12 +449,12 @@ function noteCard(entry, index) {
 
 function notesView() {
   const entries = notesWithArticles(library().notes, library().stories);
-  return html`<div class="shell">${sidebar()}<main class="library-main"><header class="topbar"><span>${today()}</span><span class="page-count">${entries.length} ${entries.length === 1 ? 'note' : 'notes'}</span></header>
+  return html`<div class="shell">${sidebar()}<main class="library-main"><header class="topbar"><span>${today()}</span><span class="page-count">Notes</span></header>
   <section class="library-hero"><p class="eyebrow">Notes</p><h1>What you made<br><em>of what you read.</em></h1><p>Every note you have written, with the article it belongs to. Notes are the one thing here you wrote yourself — no assistant is given them.</p></section>
   ${entries.length
     ? html`<section class="shelf-heading"><div><p class="eyebrow">Notes</p><h2>In your own words</h2></div><span>Most recent first</span></section><section class="note-grid">${entries.map(noteCard)}</section>`
     : html`<section class="empty-feed"><div class="empty-book">${icon('note')}</div><p class="eyebrow">No notes yet</p><h2>Write something down.</h2><p>Open any story and use the notes space at the end of it. What you type saves itself and lands here, next to the article it came from.</p><span class="empty-hint">Notes are stored encrypted, like everything else in your library.</span></section>`}</main>
-  <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Notes</p><div class="rhythm-number">${entries.length}</div><p>${entries.length === 1 ? 'note' : 'notes'} written<br>across ${library().stories.length} on your shelf</p></div><div class="aside-block aside-note"><span>${icon('lock')}</span><p>Your notes are held back from <code>get-current-feed</code>. An assistant reading your library does not read these.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Library ready'}</div></aside></div>`;
+  <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Notes</p><div class="rhythm-number">${entries.length}</div><p>${entries.length === 1 ? 'note' : 'notes'} written<br>in your own words</p></div><div class="aside-block aside-note"><span>${icon('lock')}</span><p>Your notes are held back from <code>get-current-feed</code>. An assistant reading your library does not read these.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Library ready'}</div></aside></div>`;
 }
 
 function libraryView() {
@@ -448,12 +473,12 @@ function libraryView() {
           ? { eyebrow: currentFolder.name, heading: currentFolder.name, title: html`Make room for<br><em>good stories.</em>`, lead: 'Reporting, blogs, and independent voices — saved with their source and ready when you are.' }
           : { eyebrow: `${store.profile.name}'s reading shelf`, heading: 'On your shelf', title: html`Make room for<br><em>good stories.</em>`, lead: 'Your subscriptions and your assistant\'s finds in one timeline, newest first by publication date.' };
   const lead = stories[0]; const rest = stories.slice(1);
-  return html`<div class="shell">${sidebar()}<main class="library-main"><header class="topbar"><span>${today()}</span><span class="page-count">${stories.length} ${stories.length === 1 ? 'story' : 'stories'}</span></header>
+  return html`<div class="shell">${sidebar()}<main class="library-main"><header class="topbar"><span>${today()}</span><span class="page-count">${unreadCount(stories) ? `${unreadCount(stories)} unread` : 'All read'}</span></header>
   <section class="library-hero"><p class="eyebrow">${page.eyebrow}</p><h1>${page.title}</h1><p>${page.lead}</p></section>
   ${lead ? continueCard(lead) : emptyFeed()}
   <section class="shelf-heading"><div><p class="eyebrow">${page.eyebrow}</p><h2>${page.heading}</h2></div><span>${stories.length ? 'Newest first' : 'Nothing here yet'}</span></section>
   ${rest.length ? html`<section class="story-grid">${rest.map(storyCard)}</section>` : ''}</main>
-  <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Reading rhythm</p><div class="rhythm-number">${library().saved.length}</div><p>stories saved<br>from ${library().stories.length} on your shelf</p></div><div class="aside-block"><p class="eyebrow">Following</p><div class="rhythm-number">${library().subscriptions.length}</div><p>${library().subscriptions.length === 1 ? 'blog or newsletter' : 'blogs and newsletters'}<br>you subscribe to</p></div><div class="aside-block aside-note"><span>${icon('rss')}</span><p><strong>${feedStories().length}</strong> from your own subscriptions, <strong>${library().stories.length - feedStories().length}</strong> found by an assistant. Every card says which, because the words in one are the publisher's and in the other a model's.</p></div><div class="aside-block aside-note"><span>${icon('bookmark')}</span><p>Every story keeps its original source, publication date, and a direct path back to the reporting.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Library ready'}</div></aside></div>`;
+  <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Waiting for you</p><div class="rhythm-number">${unreadCount(library().stories)}</div><p>${unreadCount(library().stories) === 1 ? 'story unread' : 'stories unread'}<br>on your shelf</p></div><div class="aside-block"><p class="eyebrow">Following</p><div class="rhythm-number">${library().subscriptions.length}</div><p>${library().subscriptions.length === 1 ? 'blog or newsletter' : 'blogs and newsletters'}<br>you subscribe to</p></div><div class="aside-block aside-note"><span>${icon('rss')}</span><p><strong>${feedStories().length}</strong> from your own subscriptions, <strong>${library().stories.length - feedStories().length}</strong> found by an assistant. Every card says which, because the words in one are the publisher's and in the other a model's.</p></div><div class="aside-block aside-note"><span>${icon('bookmark')}</span><p>Every story keeps its original source, publication date, and a direct path back to the reporting.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Library ready'}</div></aside></div>`;
 }
 
 /**
@@ -903,7 +928,7 @@ document.addEventListener('click', async (event) => {
   if (action === 'open-ai') { state.activeFolder = 'ai'; state.view = 'library'; }
   if (action === 'open-account') { state.settingsOpen = false; state.view = 'account'; }
   if (action === 'open-folder') { state.activeFolder = folder; state.view = 'library'; }
-  if (action === 'open-reader') { state.selectedStoryId = story; state.view = 'reader'; window.scrollTo({ top: 0, behavior: 'smooth' }); }
+  if (action === 'open-reader') { state.selectedStoryId = story; state.view = 'reader'; markStoryRead(story).catch(() => {}); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   if (action === 'back-to-library') { state.view = 'library'; state.selectedStoryId = null; }
   if (action === 'increase-font') { updateSettings({ fontScale: Math.min(1.22, Number((settings().fontScale + 0.06).toFixed(2))) }).catch(reportError); }
   if (action === 'decrease-font') { updateSettings({ fontScale: Math.max(0.88, Number((settings().fontScale - 0.06).toFixed(2))) }).catch(reportError); }

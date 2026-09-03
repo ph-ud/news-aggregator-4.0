@@ -216,6 +216,20 @@ export function normalizeSubscription({ name, url, host, kind = 'blog', descript
 }
 
 /**
+ * Read state.
+ *
+ * A story is unread until it has been opened, and `readAt` records when that was. It lives on
+ * the story rather than in a record of its own, so a story that leaves the shelf takes its read
+ * state with it instead of stranding a marker pointing at nothing.
+ *
+ * Counts are unread counts. A total tells a reader nothing they cannot see by looking at the
+ * shelf; what they want to know is how much is waiting, which is why every reader ever built
+ * badges the unread and not the whole.
+ */
+export function isUnread(story) { return !story?.readAt; }
+export function unreadCount(stories) { return (stories || []).reduce((total, story) => total + (isUnread(story) ? 1 : 0), 0); }
+
+/**
  * Notes.
  *
  * A note is the only text in this library the reader wrote themselves. Everything else is a

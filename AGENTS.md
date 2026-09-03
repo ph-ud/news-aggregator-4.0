@@ -96,6 +96,21 @@ until it became a subscription. It is gone, along with `discover-creators` and t
   guarded sink rather than being appended as a detached node. Nothing in it holds text the reader
   is mid-way through typing, because a repaint rebuilds it.
 
+## Read State and Counts
+
+- **Every badge counts unread, never a total.** A total is something the reader can see by
+  looking at the shelf; what they want to know is how much is waiting. Zero unread renders no
+  badge at all, as a badge should.
+- **`readAt` lives on the story**, not in a record of its own. A `replace` that drops a story
+  takes its read state with it, where a separate marker would survive and count toward a badge
+  for something no longer on any shelf.
+- **Marking read does not re-render.** The reader page has no sidebar, so no badge on screen is
+  stale, and a repaint would rebuild the note editor underneath the reader. The write is
+  fire-and-forget: a failed one must never stop someone reading.
+- **Read stories recede; they do not disappear.** Dimmed title, summary and cover, and the unread
+  dot withheld. Keep it gentle — a shelf where read stories have visibly settled back is the
+  point, but a feed that shouts about three unread items is worse than one that says nothing.
+
 ## Notes
 
 A note is the only text in this library the reader wrote themselves. Everything else is a

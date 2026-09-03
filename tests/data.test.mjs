@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeStories, normalizeFeedItems, normalizeSubscription, normalizeNote, notesWithArticles, NOTE_LIMIT, sortStoriesByDate, staleStoriesForReplace, withoutFeedDuplicates, subscriptionForFeed, originOf, isFromFeed, addedByLabel, provenanceLabel, originBadge, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
+import { normalizeStories, normalizeFeedItems, normalizeSubscription, normalizeNote, notesWithArticles, NOTE_LIMIT, isUnread, unreadCount, sortStoriesByDate, staleStoriesForReplace, withoutFeedDuplicates, subscriptionForFeed, originOf, isFromFeed, addedByLabel, provenanceLabel, originBadge, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
 
 test('normalizes agent-supplied news while preserving provenance', () => {
   const stories = normalizeStories('fusion energy', [{ title: 'Fusion update', source: 'Example News', url: 'https://example.com/fusion', publishedAt: '2026-08-26T10:00:00Z', summary: 'A concise update.' }]);
@@ -285,4 +285,35 @@ test('an orphan with nothing recorded still says what it is, and blank notes are
   assert.equal(entry.title, 'A story no longer on the shelf');
   assert.deepEqual(notesWithArticles([{ id: 'n2', storyId: 's1', text: '   ' }], []), []);
   assert.deepEqual(notesWithArticles(undefined, undefined), []);
+});
+
+/* ---------- read state ---------- */
+
+test('a story is unread until it has been opened', () => {
+  assert.equal(isUnread({ id: 'a' }), true);
+  assert.equal(isUnread({ id: 'a', readAt: '' }), true, 'an empty stamp is not a read');
+  assert.equal(isUnread({ id: 'a', readAt: '2026-09-03T00:00:00Z' }), false);
+  assert.equal(isUnread(undefined), true);
+});
+
+test('counts are unread counts, because a total is what the shelf already shows', () => {
+  const shelf = [
+    { id: 'a' },
+    { id: 'b', readAt: '2026-09-01T00:00:00Z' },
+    { id: 'c' },
+    { id: 'd', readAt: '2026-09-02T00:00:00Z' },
+  ];
+  assert.equal(unreadCount(shelf), 2);
+  assert.equal(unreadCount(shelf.filter((story) => story.readAt)), 0, 'nothing unread means no badge at all');
+  assert.equal(unreadCount([]), 0);
+  assert.equal(unreadCount(undefined), 0);
+});
+
+test('read state rides on the story, so a dropped story strands no marker', () => {
+  /* A separate record would outlive the story a replace removed and count toward a badge for
+     something no longer on any shelf. */
+  const [story] = normalizeStories('fusion', [{ title: 'T', source: 'S', url: 'https://example.com/a', summary: 'x' }]);
+  assert.equal('readAt' in story, false, 'a fresh story carries no stamp');
+  assert.equal(isUnread(story), true);
+  assert.equal(isUnread({ ...story, readAt: new Date().toISOString() }), false);
 });
