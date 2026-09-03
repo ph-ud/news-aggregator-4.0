@@ -1,4 +1,4 @@
-import { normalizeStories, normalizeCreators, addedByLabel, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from './src/data.js';
+import { normalizeStories, normalizeCreators, staleStoriesForReplace, staleCreatorsForReplace, addedByLabel, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from './src/data.js';
 import { html, raw, SafeHtml } from './src/html.js';
 import { store } from './src/store.js';
 import { createAuthTools } from './src/auth-tools.js';
@@ -14,7 +14,10 @@ const state = {
   authMode: 'signin', authError: '', authBusy: false, authDraft: { name: '', email: '' },
   recoveryKey: '', booting: true, webmcp: { supported: false, registered: 0 },
 };
-let toolsRegistered = false;
+/* Names already handed to document.modelContext.registerTool(). Tracking this instead of a
+   single "done" flag means a partial failure (one bad tool mid-loop) can't wedge every later
+   sign-in into retrying — and re-registering — tools the browser already has. */
+const registeredToolNames = new Set();
 let rekeyInFlight = false;
 /* Whether this browser has a password store to offer. Fixed for the life of the page. */
 const hasPasswordManager = credentialsAvailable();
@@ -167,8 +170,15 @@ async function injectNews(topic, stories, mode = 'replace') {
   }
   if (mode === 'replace') {
     const incoming = new Set(enriched.map((story) => story.url));
-    const stale = library().stories.filter((story) => !incoming.has(story.url));
-    if (stale.length) await store.remove(stale.map((story) => story.id));
+    const stale = staleStoriesForReplace(library().stories, enriched[0].topic, incoming);
+    if (stale.length) {
+      const staleIds = stale.map((story) => story.id);
+      await store.remove(staleIds);
+      /* A removed story leaves its "saved" record pointing nowhere; drop that too, or the
+         reader's saved count and shelf quietly disagree. */
+      const orphanedSaved = library().saved.filter((entry) => staleIds.includes(entry.storyId));
+      if (orphanedSaved.length) await store.remove(orphanedSaved.map((entry) => entry.id));
+    }
   }
   await store.put(enriched);
   state.activeFolder = enriched[0]?.tagIds[0] || 'all';
@@ -185,7 +195,10 @@ async function addCreators(topic, creators, mode = 'append') {
   if (!normalized.length) throw new Error('No valid creators were supplied. Each one needs a name and an https URL.');
   const known = new Set(library().creators.map((creator) => creator.host));
   const incoming = normalized.filter((creator) => mode === 'replace' || !known.has(creator.host));
-  if (mode === 'replace' && library().creators.length) await store.remove(library().creators.map((creator) => creator.id));
+  if (mode === 'replace') {
+    const stale = staleCreatorsForReplace(library().creators, topic);
+    if (stale.length) await store.remove(stale.map((creator) => creator.id));
+  }
   if (incoming.length) await store.put(incoming);
   state.view = 'discover'; render();
   toast(`${incoming.length} ${incoming.length === 1 ? 'creator' : 'creators'} to explore.`);
@@ -375,15 +388,14 @@ function accountSnapshot() {
 }
 
 async function registerWebMcpTools() {
-  if (!document.modelContext?.registerTool || toolsRegistered) return;
-  toolsRegistered = true;
+  if (!document.modelContext?.registerTool) return;
   /* Login is a handoff, never a delegation: these tools open the form and wait for the
      reader. Their arguments carry no passphrase, and they never should. */
   const authTools = createAuthTools({ store, state, render, snapshot: accountSnapshot, signOut, rekeyInFlight: () => rekeyInFlight });
   const tools = [
     { name: 'get-account-status', title: 'Check the 4.0-reads account', description: 'Report whether a reader is signed in to 4.0-reads and how much is in their library. Call this before saving, subscribing, or adding anything: every write tool fails while signed out. Only the person at the keyboard can sign in, because their passphrase is what decrypts the library — call start-sign-in to put the form in front of them rather than asking them for credentials.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true }, execute: async () => accountSnapshot() },
 
-    { name: 'inject-news-to-feed', title: 'Add web-researched news to 4.0-reads', description: 'Create or update a personal topic shelf with selected web-researched articles. Requires a signed-in account. Search fast and favor trustworthy primary reporting published in the last 24–48 hours; a story older than 7 days should only appear when it is essential context, and month-old stories are normally out of scope. Prefer direct source pages, verify publication time, avoid duplicates, and keep the result set concise. Write a real summary for every story: this app never fetches the article, so your summary is the entire text the reader gets unless they follow the link, and a single teaser line leaves them with nothing to read. Aim for 4–6 sentences (roughly 80–150 words) covering what happened, who is involved, the specific figures or findings that matter, and why it is significant — in your own words, drawn only from the reporting, never invented and never a verbatim copy of the article. Provide imageUrl when a relevant article image is available; otherwise the shelf uses the source site favicon. Stories arrive unsaved — the reader chooses what to save. The app never fetches or opens article links.', inputSchema: { type: 'object', properties: { topic: { type: 'string' }, mode: { type: 'string', enum: ['replace', 'append'] }, stories: { type: 'array', minItems: 1, maxItems: 10, items: { type: 'object', properties: {
+    { name: 'inject-news-to-feed', title: 'Add web-researched news to 4.0-reads', description: 'Create or update a personal topic shelf with selected web-researched articles. Requires a signed-in account. Search fast and favor trustworthy primary reporting published in the last 24–48 hours; a story older than 7 days should only appear when it is essential context, and month-old stories are normally out of scope. Prefer direct source pages, verify publication time, avoid duplicates, and keep the result set concise. Write a real summary for every story: this app never fetches the article, so your summary is the entire text the reader gets unless they follow the link, and a single teaser line leaves them with nothing to read. Aim for 4–6 sentences (roughly 80–150 words) covering what happened, who is involved, the specific figures or findings that matter, and why it is significant — in your own words, drawn only from the reporting, never invented and never a verbatim copy of the article. Provide imageUrl when a relevant article image is available; otherwise the shelf uses the source site favicon. Stories arrive unsaved — the reader chooses what to save. mode: "replace" (the default) only replaces this exact topic\'s own shelf, never other topics\' stories. The app never fetches or opens article links.', inputSchema: { type: 'object', properties: { topic: { type: 'string', maxLength: 120 }, mode: { type: 'string', enum: ['replace', 'append'] }, stories: { type: 'array', minItems: 1, maxItems: 10, items: { type: 'object', properties: {
       title: { type: 'string', description: 'The article\'s own headline, not a rewritten one.' },
       source: { type: 'string', description: 'Publication name, e.g. "Reuters" — not a URL.' },
       url: { type: 'string', description: 'Direct https link to the article on the publisher\'s site.' },
@@ -391,13 +403,13 @@ async function registerWebMcpTools() {
       publishedAt: { type: 'string', description: 'Original publication time as an ISO 8601 date, verified from the article rather than the search index.' },
       summary: { type: 'string', maxLength: SUMMARY_LIMIT, description: 'The reader sees this instead of the article, which the app cannot fetch. Write 4–6 sentences (about 80–150 words) in your own words: what happened, who is involved, the specific numbers or findings, and why it matters. Not a headline restatement, not one line, and nothing the reporting does not support.' },
       category: { type: 'string', description: 'Short topical label used as the shelf kicker, e.g. "Energy".' },
-    }, required: ['title', 'source', 'url', 'summary'], additionalProperties: false } } }, required: ['topic', 'stories'], additionalProperties: false }, annotations: UNTRUSTED, execute: async ({ topic, stories, mode = 'replace' }) => injectNews(topic, stories, mode) },
+    }, required: ['title', 'source', 'url', 'summary'], additionalProperties: false } } }, required: ['topic', 'stories'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: true }, execute: async ({ topic, stories, mode = 'replace' }) => injectNews(topic, stories, mode) },
 
-    { name: 'discover-creators', title: 'Suggest blogs and creators to follow', description: 'Add researched blogs, newsletters, podcasts, and independent creators to the reader\'s Discover page. Requires a signed-in account. Favor primary homepages over aggregator profiles, verify the site is still publishing, and say plainly in whyRelevant what makes each one a fit. Nothing is subscribed automatically: the reader presses Subscribe. The app never fetches or opens the links you supply.', inputSchema: { type: 'object', properties: { topic: { type: 'string' }, mode: { type: 'string', enum: ['replace', 'append'] }, creators: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' }, feedUrl: { type: 'string' }, handle: { type: 'string' }, kind: { type: 'string', enum: ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'] }, cadence: { type: 'string' }, description: { type: 'string' }, whyRelevant: { type: 'string' }, topics: { type: 'array', maxItems: 4, items: { type: 'string' } } }, required: ['name', 'url'], additionalProperties: false } } }, required: ['topic', 'creators'], additionalProperties: false }, annotations: UNTRUSTED, execute: async ({ topic, creators, mode = 'append' }) => addCreators(topic, creators, mode) },
+    { name: 'discover-creators', title: 'Suggest blogs and creators to follow', description: 'Add researched blogs, newsletters, podcasts, and independent creators to the reader\'s Discover page. Requires a signed-in account. Favor primary homepages over aggregator profiles, verify the site is still publishing, and say plainly in whyRelevant what makes each one a fit. Nothing is subscribed automatically: the reader presses Subscribe. mode: "replace" only replaces creators discovered for this exact topic, never the whole Discover page. The app never fetches or opens the links you supply.', inputSchema: { type: 'object', properties: { topic: { type: 'string', maxLength: 120 }, mode: { type: 'string', enum: ['replace', 'append'] }, creators: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' }, feedUrl: { type: 'string' }, handle: { type: 'string' }, kind: { type: 'string', enum: ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'] }, cadence: { type: 'string' }, description: { type: 'string' }, whyRelevant: { type: 'string' }, topics: { type: 'array', maxItems: 4, items: { type: 'string' } } }, required: ['name', 'url'], additionalProperties: false } } }, required: ['topic', 'creators'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: true }, execute: async ({ topic, creators, mode = 'append' }) => addCreators(topic, creators, mode) },
 
     { name: 'get-current-feed', title: 'Read the 4.0-reads library', description: 'Read the signed-in reader\'s stories, shelves, saved stories, subscriptions, and discovered creators. Read-only. This decrypts in the page, so it works only while the reader is signed in on this device.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, ...UNTRUSTED }, execute: async () => ({ ...accountSnapshot(), ...library() }) },
 
-    { name: 'save-story', title: 'Save a story to the account', description: 'Save a story that is already on the shelf so it stays in the reader\'s Saved list. Requires a signed-in account. Identify the story by its id from get-current-feed, or by its exact url.', inputSchema: { type: 'object', properties: { storyId: { type: 'string' }, url: { type: 'string' } }, additionalProperties: false }, execute: async ({ storyId, url }) => {
+    { name: 'save-story', title: 'Save a story to the account', description: 'Save a story that is already on the shelf so it stays in the reader\'s Saved list. Requires a signed-in account. Identify the story by its id from get-current-feed, or by its exact url.', inputSchema: { type: 'object', properties: { storyId: { type: 'string' }, url: { type: 'string' } }, additionalProperties: false }, annotations: { destructiveHint: false, idempotentHint: true }, execute: async ({ storyId, url }) => {
       requireAccount();
       const story = library().stories.find((entry) => entry.id === storyId || (url && entry.url === url));
       if (!story) throw new Error('No story on the shelf matches that id or url.');
@@ -407,7 +419,7 @@ async function registerWebMcpTools() {
       return { saved: true, title: story.title, savedCount: library().saved.length };
     } },
 
-    { name: 'subscribe-to-source', title: 'Subscribe to a blog, creator, or source', description: 'Follow a blog, newsletter, or creator in the reader\'s account. Requires a signed-in account. Use the creator\'s own https homepage; one subscription is kept per site.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' }, kind: { type: 'string', enum: ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'] }, description: { type: 'string' } }, required: ['name', 'url'], additionalProperties: false }, annotations: UNTRUSTED, execute: async ({ name, url, kind = 'blog', description = '' }) => {
+    { name: 'subscribe-to-source', title: 'Subscribe to a blog, creator, or source', description: 'Follow a blog, newsletter, or creator in the reader\'s account. Requires a signed-in account. Use the creator\'s own https homepage; one subscription is kept per site.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' }, kind: { type: 'string', enum: ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'] }, description: { type: 'string' } }, required: ['name', 'url'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: false, idempotentHint: true }, execute: async ({ name, url, kind = 'blog', description = '' }) => {
       requireAccount();
       if (isSubscribed(url)) return { subscribed: true, alreadySubscribed: true, name: subscriptionFor(url).name };
       const result = await toggleSubscription({ name, url, kind, description }); render();
@@ -415,7 +427,7 @@ async function registerWebMcpTools() {
       return { subscribed: true, name: result.subscription.name, subscriptionCount: library().subscriptions.length };
     } },
 
-    { name: 'unsubscribe-from-source', title: 'Unsubscribe from a source', description: 'Stop following a blog, newsletter, or creator in the reader\'s account. Requires a signed-in account.', inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'], additionalProperties: false }, execute: async ({ url }) => {
+    { name: 'unsubscribe-from-source', title: 'Unsubscribe from a source', description: 'Stop following a blog, newsletter, or creator in the reader\'s account. Requires a signed-in account.', inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'], additionalProperties: false }, annotations: { destructiveHint: true }, execute: async ({ url }) => {
       requireAccount();
       if (!isSubscribed(url)) throw new Error('That source is not in your subscriptions.');
       const result = await toggleSubscription({ url, name: '' }); render();
@@ -425,8 +437,16 @@ async function registerWebMcpTools() {
 
     ...authTools,
   ];
-  try { for (const tool of tools) await document.modelContext.registerTool(tool); state.webmcp = { supported: true, registered: tools.length }; render(); }
-  catch (error) { toolsRegistered = false; console.warn('WebMCP registration unavailable:', error); }
+  /* Each tool registers on its own: one bad or already-registered tool must not stop the
+     rest, and a retry (another sign-in after a partial failure) must not re-throw
+     InvalidStateError for names the browser already has. */
+  for (const tool of tools) {
+    if (registeredToolNames.has(tool.name)) continue;
+    try { await document.modelContext.registerTool(tool); registeredToolNames.add(tool.name); }
+    catch (error) { console.warn(`WebMCP tool "${tool.name}" failed to register:`, error); }
+  }
+  state.webmcp = { supported: true, registered: registeredToolNames.size };
+  render();
 }
 
 /* Updates the form in place. A re-render would clear the fields the reader just typed. */
