@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A fictional publication, for recording only. Never point the demo at a real publisher's
+  name over entries the publisher did not write: the whole claim of the RSS badge is that
+  the text under it is genuinely theirs.
+-->
+<rss version="2.0">
+  <channel>
+    <title>The Kernel Letter</title>
+    <link>https://kernel-letter.example</link>
+    <description>Notes on the web platform, weekly.</description>
+    <item>
+      <title>Trusted Types are finally boring</title>
+      <link>https://kernel-letter.example/posts/trusted-types-are-boring</link>
+      <guid>https://kernel-letter.example/posts/trusted-types-are-boring</guid>
+      <pubDate>Mon, 01 Sep 2025 09:00:00 GMT</pubDate>
+      <author>editor@kernel-letter.example (A. Renner)</author>
+      <description>Six months after we turned the policy on, the interesting part is how little there is to say. One sink, one policy, and every innerHTML assignment in the codebase now goes through a function you can read in an afternoon. Here is what the migration actually cost us.</description>
+    </item>
+    <item>
+      <title>The same-origin policy is not a bug in your feed reader</title>
+      <link>https://kernel-letter.example/posts/same-origin-feed-readers</link>
+      <guid>https://kernel-letter.example/posts/same-origin-feed-readers</guid>
+      <pubDate>Thu, 28 Aug 2025 07:30:00 GMT</pubDate>
+      <description>Every hosted reader polls feeds from its own servers, and every one of them therefore holds a list of exactly what each subscriber reads. That is not a design choice anybody made on purpose; it falls out of a browser rule. There is more than one way around it.</description>
+    </item>
+    <item>
+      <title>A short defence of the unread badge</title>
+      <link>https://kernel-letter.example/posts/defence-of-the-unread-badge</link>
+      <guid>https://kernel-letter.example/posts/defence-of-the-unread-badge</guid>
+      <pubDate>Tue, 26 Aug 2025 16:05:00 GMT</pubDate>
+      <description>Counts that show totals are decoration. Counts that show what is waiting are information, and the difference is whether the number ever goes down.</description>
+    </item>
+    <item>
+      <title>What a passphrase actually has to do</title>
+      <link>https://kernel-letter.example/posts/what-a-passphrase-does</link>
+      <guid>https://kernel-letter.example/posts/what-a-passphrase-does</guid>
+      <pubDate>Fri, 22 Aug 2025 11:15:00 GMT</pubDate>
+      <description>Two secrets, one typed string, and a domain separator between them. If your login credential and your decryption key come out of the same derivation, a server breach hands over both.</description>
+    </item>
+  </channel>
+</rss>

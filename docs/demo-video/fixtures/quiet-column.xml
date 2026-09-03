@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fictional, for recording only. Atom, so the demo exercises the other half of src/rss.js. -->
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>The Quiet Column</title>
+  <link href="https://quiet-column.example"/>
+  <updated>2025-09-02T08:00:00Z</updated>
+  <entry>
+    <title>Consent does not live in a button</title>
+    <link href="https://quiet-column.example/consent-is-not-a-button"/>
+    <id>https://quiet-column.example/consent-is-not-a-button</id>
+    <updated>2025-09-02T08:00:00Z</updated>
+    <author><name>M. Okonkwo</name></author>
+    <summary>We spent a year adding a staging area so people could approve things one at a time, and then found they were approving in conversation anyway. The button was a record of a decision made somewhere else.</summary>
+  </entry>
+  <entry>
+    <title>Notes you did not write for anyone</title>
+    <link href="https://quiet-column.example/notes-for-no-one"/>
+    <id>https://quiet-column.example/notes-for-no-one</id>
+    <updated>2025-08-30T13:40:00Z</updated>
+    <author><name>M. Okonkwo</name></author>
+    <summary>The margin of a book is the least performative writing most people do. Software that syncs it somewhere should be able to say, precisely, who else can read it.</summary>
+  </entry>
+  <entry>
+    <title>Against the infinite shelf</title>
+    <link href="https://quiet-column.example/against-the-infinite-shelf"/>
+    <id>https://quiet-column.example/against-the-infinite-shelf</id>
+    <updated>2025-08-27T06:20:00Z</updated>
+    <summary>A reader that never lets anything settle is a reader you eventually stop opening. Read items should recede, not vanish.</summary>
+  </entry>
+</feed>
