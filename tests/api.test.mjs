@@ -276,7 +276,7 @@ test('every view showing agent-written text says where that text came from', asy
 
   /* One helper builds the label, so a new card cannot quietly ship an unattributed variant. */
   assert.match(code, /function provenanceTag\(record\)/);
-  for (const name of ['storyMeta', 'continueCard', 'creatorCard']) {
+  for (const name of ['storyMeta', 'continueCard']) {
     assert.match(view(name), /provenanceTag\(/, `${name} renders agent-supplied prose and must attribute it`);
   }
 
@@ -285,6 +285,58 @@ test('every view showing agent-written text says where that text came from', asy
   assert.match(code, /maxLength: SUMMARY_LIMIT/, 'the schema must advertise the limit the normalizer enforces');
   assert.match(code, /required: \['title', 'source', 'url', 'summary'\]/, 'a story with no summary has no readable text at all');
   assert.match(code, /80.150 words/, 'the tool must say how much summary it wants');
+
+  /* Two pipelines now write stories, and a card that cannot say which is which lets a model's
+     summary read as a publisher's own post. The badge comes from `via`, not from each view. */
+  assert.match(code, /function provenanceTag\(record\)/);
+  assert.match(code, /originBadge\(record\)/, 'the tag must show which pipeline delivered the record');
+  assert.match(code, /provenanceLabel\(record\)/, 'and the wording must come from the shared helper');
+  assert.equal(/Added by \$\{addedByLabel\(record\)\}/.test(code), false, 'a feed entry is not "added by" an assistant');
+
+  /* The reader page makes a claim about who wrote the text below it, so it must branch. */
+  assert.match(code, /const fromFeed = isFromFeed\(story\)/, 'readerView must know which pipeline it is rendering');
+  assert.match(code, /class="article-notice article-notice-rss"/, 'a feed entry needs its own notice');
+  assert.match(code, /own feed entry, not a summary of it/, 'and that notice must not call it an assistant\'s summary');
+
+  /* Badges count what is waiting, not what is there. A total is visible by looking at the shelf. */
+  assert.match(code, /function folderCount\(id\) \{ return unreadCount\(/, 'shelf badges count unread');
+  assert.equal(/<b>\$\{feed\.length/.test(code), false, 'no nav badge may show a total');
+  assert.equal(/<b>\$\{saved\.length\}<\/b>/.test(code), false, 'nor may Saved');
+  assert.match(code, /markStoryRead\(story\)\.catch/, 'opening a story marks it read');
+  const markRead = code.slice(code.indexOf('async function markStoryRead'));
+  assert.equal(/render\(\)/.test(markRead.slice(0, markRead.indexOf('}'))), false, 'marking read must not repaint the reader');
+
+  /* Notes are the reader's own words, and the only record here that no assistant may read. */
+  assert.match(code, /const \{ notes, \.\.\.shared \} = library\(\)/, 'get-current-feed must hold notes back');
+  assert.equal(/execute: async \(\) => \(\{ \.\.\.accountSnapshot\(\), \.\.\.library\(\) \}\)/.test(code), false, 'no tool may return the whole library including notes');
+  assert.equal(/name: 'read-notes'|name: 'get-notes'/.test(code), false, 'no tool reads the reader\'s notes');
+
+  /* The note editor is a live textarea. A render would rebuild it and take the caret. */
+  assert.match(code, /data-role="note-input"/);
+  const noteHandler = code.slice(code.indexOf("const field = event.target.closest('[data-role=\"note-input\"]')"));
+  assert.equal(/render\(\)/.test(noteHandler.slice(0, noteHandler.indexOf('Escape'))), false, 'autosave must not re-render while the reader is typing');
+  assert.match(code, /status\.textContent = 'Saving…'/, 'the indicator is written in place instead');
+
+  /* Creators are gone: a subscription is the only thing a reader follows. */
+  assert.equal(/discover-creators|normalizeCreators|creatorCard|discoverView/.test(code), false, 'the creator staging area was removed');
+  assert.equal(/data-action="open-discover"/.test(code), false, 'and so was its tab');
+
+  /* Managing subscriptions belongs in settings, not in the reading column. */
+  assert.match(code, /function settingsDialog\(\)/);
+  assert.match(code, /role="dialog" aria-modal="true"/, 'the settings pop-up must be a real dialog');
+  assert.match(code, /data-action="open-settings"/);
+  const sidebarView = code.slice(code.indexOf('function sidebar()'), code.indexOf('function provenanceTag'));
+  assert.equal(/data-action="unsubscribe"/.test(sidebarView), false, 'the left column must not manage subscriptions');
+
+  /* The Subscriptions tab is the posts from people the reader follows. An injection landing
+     there would put a model's summary among them, so the tab filters and the injection moves. */
+  assert.match(code, /if \(state\.activeFolder === 'rss'\) return sortStoriesByDate\(stories\.filter\(isFromFeed\)\)/, 'the subscriptions tab reads feed entries only');
+  assert.match(code, /const wasOnSubscriptions = state\.activeFolder === 'rss'/, 'an injection must notice it is on the subscriptions tab');
+  assert.match(code, /state\.activeFolder = wasOnSubscriptions \? 'ai' :/, 'and send its results to AI finds instead of into the feed tab');
+  assert.match(code, /data-action="open-subscriptions"/, 'the subscriptions tab must be reachable from the nav');
+
+  /* Nothing in the page may fetch a feed: that is the reader's own machine's job. */
+  assert.equal(/fetch\(\s*(?:feed|entry|subscription)/i.test(code), false, 'the page must never fetch a feed itself');
 
   /* The reader page is the one that reads like an article, so it must be explicit. */
   assert.match(code, /class="article-notice"/, 'the reader page must state that the body is a summary');
