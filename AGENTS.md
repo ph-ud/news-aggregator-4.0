@@ -51,6 +51,32 @@ than advisory:
   subscription already delivered; the publisher's own entry wins over a summary of it.
 - Records stored before `via` existed default to `ai`, which is what they were.
 
+## The Tabs
+
+The left column is three shelves over one library, and which shelf a story lands on follows
+from its `via` rather than from where the reader happened to be standing:
+
+- **Home** is both pipelines in one timeline, ordered by **publication date** — not arrival.
+  Arrival order clumps it: a fetch drops a subscription's backlog in at once and an injection
+  drops a topic's batch in at once, so the shelf would read as blocks of one origin then the
+  other. Publication date is also the only date the two pipelines share a meaning for; a feed
+  entry fetched today may be a week old and belongs where a week-old story belongs.
+  `sortStoriesByDate` is that ordering, and `addedAt` breaks ties so undated entries do not
+  shuffle between renders.
+- **Subscriptions** reads from feeds and nothing else. This is the definition of the tab, not a
+  filter that happens to exclude AI stories today.
+- **AI finds** is its exact complement, so no story can fall between the two.
+
+**An injection while the reader is on Subscriptions goes to AI finds.** An assistant researching
+a topic must not put a model's summary in among posts from people the reader chose to follow —
+that is the whole claim the tab makes. The stories are still stored; only the destination
+changes, and the toast says where they went. `deliverFeedItems` is the mirror image: entries
+arriving while the reader is on AI finds move them to Subscriptions rather than reporting
+entries they cannot see.
+
+Neither redirect may be silent, and neither may be dropped. "It should not appear here" always
+means *it appears on its own tab*, never *it is discarded*.
+
 ## Fetching Feeds Without a Server
 
 A desktop reader polls feeds locally and nothing about the reader's subscriptions leaves their

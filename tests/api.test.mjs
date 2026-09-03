@@ -298,6 +298,13 @@ test('every view showing agent-written text says where that text came from', asy
   assert.match(code, /class="article-notice article-notice-rss"/, 'a feed entry needs its own notice');
   assert.match(code, /own feed entry, not a summary of it/, 'and that notice must not call it an assistant\'s summary');
 
+  /* The Subscriptions tab is the posts from people the reader follows. An injection landing
+     there would put a model's summary among them, so the tab filters and the injection moves. */
+  assert.match(code, /if \(state\.activeFolder === 'rss'\) return sortStoriesByDate\(stories\.filter\(isFromFeed\)\)/, 'the subscriptions tab reads feed entries only');
+  assert.match(code, /const wasOnSubscriptions = state\.activeFolder === 'rss'/, 'an injection must notice it is on the subscriptions tab');
+  assert.match(code, /state\.activeFolder = wasOnSubscriptions \? 'ai' :/, 'and send its results to AI finds instead of into the feed tab');
+  assert.match(code, /data-action="open-subscriptions"/, 'the subscriptions tab must be reachable from the nav');
+
   /* Nothing in the page may fetch a feed: that is the reader's own machine's job. */
   assert.equal(/fetch\(\s*(?:feed|entry|subscription)/i.test(code), false, 'the page must never fetch a feed itself');
 

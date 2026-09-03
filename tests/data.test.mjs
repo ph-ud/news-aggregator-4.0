@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeStories, normalizeCreators, normalizeFeedItems, normalizeSubscription, staleStoriesForReplace, staleCreatorsForReplace, withoutFeedDuplicates, subscriptionForFeed, originOf, isFromFeed, addedByLabel, provenanceLabel, originBadge, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
+import { normalizeStories, normalizeCreators, normalizeFeedItems, normalizeSubscription, sortStoriesByDate, staleStoriesForReplace, staleCreatorsForReplace, withoutFeedDuplicates, subscriptionForFeed, originOf, isFromFeed, addedByLabel, provenanceLabel, originBadge, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
 
 test('normalizes agent-supplied news while preserving provenance', () => {
   const stories = normalizeStories('fusion energy', [{ title: 'Fusion update', source: 'Example News', url: 'https://example.com/fusion', publishedAt: '2026-08-26T10:00:00Z', summary: 'A concise update.' }]);
@@ -236,4 +236,43 @@ test('keeps a subscription made before its feed URL is known, and marks it pendi
   assert.equal(normalizeSubscription({ name: 'X', url: 'https://x.example', feedUrl: 'javascript:alert(1)' }).feedStatus, 'pending');
   assert.equal(normalizeSubscription({ name: 'X', url: 'javascript:alert(1)' }), null);
   assert.equal(normalizeSubscription({ name: 'X', url: 'https://x.example', kind: 'telepathy' }).kind, 'blog');
+});
+
+test('orders a mixed shelf by publication date, so Home reads as one timeline', () => {
+  /* Arrival order would clump Home: a fetch drops a backlog in at once and an injection drops
+     a batch in at once, so the two pipelines would sit in blocks rather than interleaved. */
+  const shelf = [
+    { id: 'ai-old', via: 'ai', publishedAt: '2026-08-20T00:00:00Z', addedAt: '2026-09-03T10:00:00Z' },
+    { id: 'rss-new', via: 'rss', publishedAt: '2026-09-02T00:00:00Z', addedAt: '2026-09-03T09:00:00Z' },
+    { id: 'ai-new', via: 'ai', publishedAt: '2026-09-01T00:00:00Z', addedAt: '2026-09-03T10:00:00Z' },
+  ];
+  assert.deepEqual(sortStoriesByDate(shelf).map((story) => story.id), ['rss-new', 'ai-new', 'ai-old']);
+  /* Sorting must not mutate the library it was handed. */
+  assert.equal(shelf[0].id, 'ai-old');
+});
+
+test('a story with no usable date sorts last, in a stable order', () => {
+  const shelf = [
+    { id: 'undated-early', addedAt: '2026-09-01T00:00:00Z' },
+    { id: 'dated', publishedAt: '2026-08-01T00:00:00Z', addedAt: '2026-09-03T00:00:00Z' },
+    { id: 'undated-late', publishedAt: 'not a date', addedAt: '2026-09-02T00:00:00Z' },
+  ];
+  const order = sortStoriesByDate(shelf).map((story) => story.id);
+  assert.equal(order[0], 'dated', 'anything with a real date outranks one without');
+  assert.deepEqual(order.slice(1), ['undated-late', 'undated-early'], 'undated entries fall back to arrival order');
+  assert.deepEqual(sortStoriesByDate(undefined), []);
+});
+
+test('the Subscriptions tab can only ever hold feed entries', () => {
+  /* The tab is the reader's own subscriptions. An assistant researching a topic while they are
+     looking at it must not slip a model's summary in among posts from people they follow. */
+  const shelf = [
+    { id: 'rss-1', via: 'rss', publishedAt: '2026-09-02T00:00:00Z' },
+    { id: 'ai-1', via: 'ai', publishedAt: '2026-09-03T00:00:00Z' },
+    { id: 'legacy', publishedAt: '2026-09-04T00:00:00Z' },
+  ];
+  assert.deepEqual(sortStoriesByDate(shelf.filter(isFromFeed)).map((s) => s.id), ['rss-1']);
+  /* And AI finds is its complement, so nothing can fall between the two tabs. */
+  assert.deepEqual(sortStoriesByDate(shelf.filter((s) => !isFromFeed(s))).map((s) => s.id), ['legacy', 'ai-1']);
+  assert.equal(shelf.filter(isFromFeed).length + shelf.filter((s) => !isFromFeed(s)).length, shelf.length);
 });

@@ -1,4 +1,4 @@
-import { normalizeStories, normalizeCreators, normalizeFeedItems, normalizeSubscription, staleStoriesForReplace, staleCreatorsForReplace, withoutFeedDuplicates, subscriptionForFeed, addedByLabel, provenanceLabel, originBadge, isFromFeed, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from './src/data.js';
+import { normalizeStories, normalizeCreators, normalizeFeedItems, normalizeSubscription, sortStoriesByDate, staleStoriesForReplace, staleCreatorsForReplace, withoutFeedDuplicates, subscriptionForFeed, addedByLabel, provenanceLabel, originBadge, isFromFeed, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from './src/data.js';
 import { html, raw, SafeHtml } from './src/html.js';
 import { store } from './src/store.js';
 import { createAuthTools } from './src/auth-tools.js';
@@ -126,15 +126,22 @@ async function ensureFolder(name) {
   return library().folders.find((folder) => folder.slug === slug)
     || store.put({ type: 'folder', name: title, slug, addedAt: new Date().toISOString() });
 }
+/**
+ * The three tabs, and the one rule that makes them mean anything.
+ *
+ * Subscriptions reads from feeds and nothing else. It is not a filter that happens to exclude
+ * AI stories today — it is the definition of the tab, so an assistant researching a topic
+ * while the reader is looking at it cannot put a model's summary in among the posts from
+ * people they chose to follow. Those stories are still stored; they surface under AI finds
+ * and on Home. Home is both pipelines in one timeline, ordered by publication date.
+ */
 function storiesForFolder() {
   const { stories } = library();
-  if (state.activeFolder === 'all') return stories;
-  if (state.activeFolder === 'saved') { const saved = new Set(library().saved.map((entry) => entry.storyId)); return stories.filter((story) => saved.has(story.id)); }
-  /* The origin is a shelf of its own: "what my subscriptions sent" and "what an assistant
-     found" are the two halves of this library, and a badge alone cannot be read in bulk. */
-  if (state.activeFolder === 'rss') return stories.filter(isFromFeed);
-  if (state.activeFolder === 'ai') return stories.filter((story) => !isFromFeed(story));
-  return stories.filter((story) => (story.tagIds || []).includes(state.activeFolder));
+  if (state.activeFolder === 'all') return sortStoriesByDate(stories);
+  if (state.activeFolder === 'saved') { const saved = new Set(library().saved.map((entry) => entry.storyId)); return sortStoriesByDate(stories.filter((story) => saved.has(story.id))); }
+  if (state.activeFolder === 'rss') return sortStoriesByDate(stories.filter(isFromFeed));
+  if (state.activeFolder === 'ai') return sortStoriesByDate(stories.filter((story) => !isFromFeed(story)));
+  return sortStoriesByDate(stories.filter((story) => (story.tagIds || []).includes(state.activeFolder)));
 }
 function feedStories() { return library().stories.filter(isFromFeed); }
 function pendingFeeds() { return library().subscriptions.filter((entry) => !entry.feedUrl); }
@@ -234,12 +241,17 @@ async function injectNews(topic, stories, mode = 'replace') {
     }
   }
   await store.put(enriched);
-  state.activeFolder = enriched[0]?.tagIds[0] || 'all';
+  /* Never drop a research batch into Subscriptions. That tab is the posts from people the
+     reader chose to follow, and an assistant searching while they are looking at it must not
+     put its own summaries among them. The stories are stored either way — they are simply
+     shown where they belong, under AI finds and on Home. */
+  const wasOnSubscriptions = state.activeFolder === 'rss';
+  state.activeFolder = wasOnSubscriptions ? 'ai' : (enriched[0]?.tagIds[0] || 'all');
   state.newStoryIds = enriched.map((story) => story.id);
   state.view = 'library'; render();
   setTimeout(() => { state.newStoryIds = []; render(); }, 900);
-  toast(`${enriched.length} ${enriched.length === 1 ? 'story' : 'stories'} added to your shelf.`);
-  return { topic, tags: [...new Set(enriched.flatMap((story) => story.tagNames))], mode, added: enriched.length, skippedAlreadyInAFeed: supplied.length - normalized.length, feedCount: library().stories.length, via: 'ai', note: 'Stories are on the shelf but not saved yet — the reader saves each one with the Save button. They are labelled as AI-researched, distinct from entries the reader\'s own subscriptions deliver.' };
+  toast(`${enriched.length} ${enriched.length === 1 ? 'story' : 'stories'} ${wasOnSubscriptions ? 'added to AI finds, not to your subscriptions.' : 'added to your shelf.'}`);
+  return { topic, tags: [...new Set(enriched.flatMap((story) => story.tagNames))], mode, added: enriched.length, skippedAlreadyInAFeed: supplied.length - normalized.length, feedCount: library().stories.length, via: 'ai', note: 'Stories are on the shelf but not saved yet — the reader saves each one with the Save button. They appear under AI finds and on Home, never on the Subscriptions tab, which holds only entries from feeds the reader subscribed to.' };
 }
 
 async function addCreators(topic, creators, mode = 'append') {
@@ -329,10 +341,10 @@ function accountView() {
 
 function accountChip() { const name = store.profile?.name || 'Reader'; return html`<div class="account-chip"><span class="reader-mark">${initials(name)}</span><button class="account-identity" data-action="open-account" aria-label="Account settings"><strong>${name}</strong><small>${store.profile?.email || ''}</small></button><button data-action="sign-out" aria-label="Sign out">${icon('logout')}</button></div>`; }
 function folderRow(folder) { return html`<div class="folder-wrap"><button class="folder ${state.activeFolder === folder.id && state.view === 'library' ? 'active' : ''}" data-action="open-folder" data-folder="${folder.id}">${icon('folder')}<span>${folder.name}</span><b>${folderCount(folder.id)}</b></button><button class="folder-menu" data-action="rename-folder" data-folder="${folder.id}" aria-label="Rename ${folder.name}">${icon('dots')}</button></div>`; }
-function sidebar() { const { stories: feed, saved, folders, subscriptions } = library(); const libraryActive = state.view === 'library'; return html`<aside class="sidebar"><a class="brand" href="#" data-action="open-all"><span>4.0</span><strong>reads</strong></a>
-  <nav class="primary-nav" aria-label="Sections"><button class="nav-link ${libraryActive ? 'active' : ''}" data-action="open-all">${icon('book')}<span>Library</span></button><button class="nav-link ${state.view === 'discover' ? 'active' : ''}" data-action="open-discover">${icon('compass')}<span>Discover</span><b>${library().creators.length || ''}</b></button></nav>
+function sidebar() { const { stories: feed, saved, folders, subscriptions } = library(); const libraryActive = state.view === 'library'; return html`<aside class="sidebar"><a class="brand" href="#" data-action="open-home"><span>4.0</span><strong>reads</strong></a>
+  <nav class="primary-nav" aria-label="Sections"><button class="nav-link ${libraryActive && state.activeFolder === 'all' ? 'active' : ''}" data-action="open-home">${icon('book')}<span>Home</span><b>${feed.length || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'rss' ? 'active' : ''}" data-action="open-subscriptions">${icon('rss')}<span>Subscriptions</span><b>${feedStories().length || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'ai' ? 'active' : ''}" data-action="open-ai">${icon('sparkle')}<span>AI finds</span><b>${feed.length - feedStories().length || ''}</b></button><button class="nav-link ${state.view === 'discover' ? 'active' : ''}" data-action="open-discover">${icon('compass')}<span>Discover</span><b>${library().creators.length || ''}</b></button></nav>
   <div class="library-title"><span>Library</span><button data-action="new-folder" aria-label="Create shelf">${icon('plus')}</button></div>
-  <nav class="library" aria-label="Reading shelves"><button class="folder ${libraryActive && state.activeFolder === 'all' ? 'active' : ''}" data-action="open-all">${icon('inbox')}<span>All stories</span><b>${feed.length}</b></button><button class="folder ${libraryActive && state.activeFolder === 'rss' ? 'active' : ''}" data-action="open-rss">${icon('rss')}<span>From your feeds</span><b>${feedStories().length}</b></button><button class="folder ${libraryActive && state.activeFolder === 'ai' ? 'active' : ''}" data-action="open-ai">${icon('sparkle')}<span>Found by AI</span><b>${feed.length - feedStories().length}</b></button><button class="folder ${libraryActive && state.activeFolder === 'saved' ? 'active' : ''}" data-action="open-saved">${icon('bookmark')}<span>Saved</span><b>${saved.length}</b></button>${folders.map(folderRow)}</nav>
+  <nav class="library" aria-label="Reading shelves"><button class="folder ${libraryActive && state.activeFolder === 'saved' ? 'active' : ''}" data-action="open-saved">${icon('bookmark')}<span>Saved</span><b>${saved.length}</b></button>${folders.map(folderRow)}</nav>
   <div class="library-title"><span>Subscriptions</span><b class="count-pill">${subscriptions.length}</b></div>
   <nav class="library" aria-label="Subscriptions">${subscriptions.length ? subscriptions.slice(0, 6).map((entry) => html`<a class="folder sub-row ${entry.feedUrl ? '' : 'sub-pending'}" href="${safeUrl(entry.url)}" target="_blank" rel="noreferrer">${icon(entry.feedUrl ? 'rss' : 'bellFill')}<span>${entry.name}</span>${entry.feedUrl ? '' : html`<b class="feed-flag" title="No feed URL yet">no feed</b>`}</a>`) : html`<p class="sidebar-empty">Subscribe from any story or creator card.</p>`}</nav>
   <div class="sidebar-spacer"></div>${accountChip()}</aside>`; }
@@ -361,19 +373,37 @@ function subscribeButton(source, wide = false) {
 }
 function storyActions(story, wide = false) { return html`<div class="card-actions">${saveButton(story, wide)}${subscribeButton({ url: story.url, name: story.source, kind: 'blog', feedUrl: story.feedUrl || '' }, wide)}</div>`; }
 
-function emptyFeed() { return html`<section class="empty-feed"><div class="empty-book">${icon('rss')}</div><p class="eyebrow">A blank first page</p><h2>Subscribe to someone worth reading.</h2><p>Two things fill this shelf: feeds you subscribe to, which arrive as the publisher wrote them, and stories an assistant researches for you, which arrive as its summaries. Head to Discover to find people to follow, or ask for news on a topic.</p><span class="empty-hint">Every card says which of the two it is.</span></section>`; }
+function emptyFeed() {
+  const subscribed = library().subscriptions.length;
+  if (state.activeFolder === 'rss') {
+    return html`<section class="empty-feed"><div class="empty-book">${icon('rss')}</div><p class="eyebrow">Nothing from your feeds yet</p><h2>${subscribed ? 'Nothing fetched yet.' : 'Subscribe to someone worth reading.'}</h2><p>${subscribed ? html`You follow ${subscribed} ${subscribed === 1 ? 'source' : 'sources'}, but no entries have been fetched. 4.0-reads cannot fetch a feed from this page — ask your assistant to run <code>bin/rss-fetch.mjs</code> on your machine and hand the entries back.` : html`This tab holds posts from feeds you subscribe to, exactly as their publishers wrote them. Head to Discover to find people worth following.`}</p><span class="empty-hint">Only subscriptions appear here. What an assistant finds goes to AI finds.</span></section>`;
+  }
+  if (state.activeFolder === 'ai') return html`<section class="empty-feed"><div class="empty-book">${icon('sparkle')}</div><p class="eyebrow">Nothing researched yet</p><h2>Ask for news on a topic.</h2><p>Try asking: <em>“what happened in fusion energy this week?”</em>. Results land here through the <code>inject-news-to-feed</code> tool, as summaries an assistant wrote — never as the publisher's own words.</p><span class="empty-hint">The app never fetches or opens the article links it is given.</span></section>`;
+  return html`<section class="empty-feed"><div class="empty-book">${icon('book')}</div><p class="eyebrow">A blank first page</p><h2>Subscribe to someone worth reading.</h2><p>Two things fill this shelf: feeds you subscribe to, which arrive as the publisher wrote them, and stories an assistant researches for you, which arrive as its summaries. Head to Discover to find people to follow, or ask for news on a topic.</p><span class="empty-hint">Every card says which of the two it is.</span></section>`;
+}
 function storyCard(story, index) { const isNew = state.newStoryIds.includes(story.id); return html`<article class="story-card ${isNew ? 'story-arriving' : ''} ${isFromFeed(story) ? 'story-rss' : 'story-ai'}" style="--arrival-index:${index}"><button class="cover-button" data-action="open-reader" data-story="${story.id}" aria-label="Open ${story.title}">${cover(story)}</button><div class="story-card-copy"><p class="story-kicker">${story.folderName || story.category || 'Reading'}</p><h3>${story.title}</h3><p class="summary">${story.summary}</p>${storyActions(story)}<footer>${storyMeta(story)}<button class="read-link" data-action="open-reader" data-story="${story.id}">Read ${icon('arrow')}</button></footer></div></article>`; }
 function continueCard(story) { return html`<section class="continue-card"><div class="continue-cover">${cover(story, true)}</div><div class="continue-copy"><p class="eyebrow">Continue reading</p><h2>${story.title}</h2><p class="continue-source">${story.source} <span>·</span> ${date(story.publishedAt)}</p>${provenanceTag(story)}<p class="summary">${story.summary}</p><div class="continue-actions"><button class="primary-button" data-action="open-reader" data-story="${story.id}">Open story ${icon('arrow')}</button>${storyActions(story)}</div></div></section>`; }
 
 function libraryView() {
   const stories = storiesForFolder();
   const currentFolder = library().folders.find((folder) => folder.id === state.activeFolder);
-  const heading = state.activeFolder === 'saved' ? 'Saved' : currentFolder ? currentFolder.name : 'All stories';
+  const tab = state.activeFolder;
+  /* Each tab says what it holds, because "3 stories" means something different on a shelf of
+     people you follow than on a shelf of things an assistant went looking for. */
+  const page = tab === 'rss'
+    ? { eyebrow: 'Subscriptions', heading: 'From your subscriptions', title: html`Straight from<br><em>the people you follow.</em>`, lead: 'Only posts from feeds you subscribed to, newest first. Nothing an assistant researched reaches this tab.' }
+    : tab === 'ai'
+      ? { eyebrow: 'AI finds', heading: 'Found by an assistant', title: html`What an assistant<br><em>went and found.</em>`, lead: 'Stories researched for you, each one a summary written by an assistant rather than the publisher.' }
+      : tab === 'saved'
+        ? { eyebrow: 'Saved', heading: 'Saved', title: html`Kept for<br><em>a second read.</em>`, lead: 'Everything you saved, from both your subscriptions and your assistant.' }
+        : currentFolder
+          ? { eyebrow: currentFolder.name, heading: currentFolder.name, title: html`Make room for<br><em>good stories.</em>`, lead: 'Reporting, blogs, and independent voices — saved with their source and ready when you are.' }
+          : { eyebrow: `${store.profile.name}'s reading shelf`, heading: 'On your shelf', title: html`Make room for<br><em>good stories.</em>`, lead: 'Your subscriptions and your assistant\'s finds in one timeline, newest first by publication date.' };
   const lead = stories[0]; const rest = stories.slice(1);
   return html`<div class="shell">${sidebar()}<main class="library-main"><header class="topbar"><span>${today()}</span><span class="page-count">${stories.length} ${stories.length === 1 ? 'story' : 'stories'}</span></header>
-  <section class="library-hero"><p class="eyebrow">${store.profile.name}'s reading shelf</p><h1>Make room for<br><em>good stories.</em></h1><p>Reporting, blogs, and independent voices — saved with their source and ready when you are.</p></section>
+  <section class="library-hero"><p class="eyebrow">${page.eyebrow}</p><h1>${page.title}</h1><p>${page.lead}</p></section>
   ${lead ? continueCard(lead) : emptyFeed()}
-  <section class="shelf-heading"><div><p class="eyebrow">${heading}</p><h2>On your shelf</h2></div><span>${stories.length ? 'Newest first' : 'Nothing here yet'}</span></section>
+  <section class="shelf-heading"><div><p class="eyebrow">${page.eyebrow}</p><h2>${page.heading}</h2></div><span>${stories.length ? 'Newest first' : 'Nothing here yet'}</span></section>
   ${rest.length ? html`<section class="story-grid">${rest.map(storyCard)}</section>` : ''}</main>
   <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Reading rhythm</p><div class="rhythm-number">${library().saved.length}</div><p>stories saved<br>from ${library().stories.length} on your shelf</p></div><div class="aside-block"><p class="eyebrow">Following</p><div class="rhythm-number">${library().subscriptions.length}</div><p>${library().subscriptions.length === 1 ? 'blog or creator' : 'blogs and creators'}<br>you subscribe to</p></div><div class="aside-block aside-note"><span>${icon('rss')}</span><p><strong>${feedStories().length}</strong> from your own subscriptions, <strong>${library().stories.length - feedStories().length}</strong> found by an assistant. Every card says which, because the words in one are the publisher's and in the other a model's.</p></div><div class="aside-block aside-note"><span>${icon('bookmark')}</span><p>Every story keeps its original source, publication date, and a direct path back to the reporting.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Library ready'}</div></aside></div>`;
 }
@@ -691,9 +721,9 @@ document.addEventListener('click', async (event) => {
   if (action === 'finish-recovery') { state.recoveryKey = ''; state.view = 'library'; toast(`Welcome, ${store.profile.name}.`); render(); return; }
   if (action === 'sign-out') { await signOut(); toast('Signed out. Your library stays encrypted on the server.'); return; }
 
-  if (action === 'open-all') { event.preventDefault(); state.activeFolder = 'all'; state.view = 'library'; }
+  if (action === 'open-home') { event.preventDefault(); state.activeFolder = 'all'; state.view = 'library'; }
   if (action === 'open-saved') { state.activeFolder = 'saved'; state.view = 'library'; }
-  if (action === 'open-rss') { state.activeFolder = 'rss'; state.view = 'library'; }
+  if (action === 'open-subscriptions') { state.activeFolder = 'rss'; state.view = 'library'; }
   if (action === 'open-ai') { state.activeFolder = 'ai'; state.view = 'library'; }
   if (action === 'open-discover') { state.view = 'discover'; }
   if (action === 'open-account') { state.view = 'account'; }

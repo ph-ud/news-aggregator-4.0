@@ -59,6 +59,26 @@ export function normalizeStories(topic, stories) {
 }
 
 /**
+ * Stories newest first by when they were *published*, not when they landed here.
+ *
+ * Home mixes both pipelines, and arrival order would clump it: a fetch drops a subscription's
+ * whole backlog in at once, an injection drops a topic's whole batch in at once, so the shelf
+ * would read as blocks of one origin after blocks of the other rather than as one timeline. A
+ * publication date is also the only date the two pipelines share a meaning for — a feed entry
+ * fetched today may be a week old, and it should sit where a week-old story belongs.
+ *
+ * `addedAt` breaks the tie, so entries a feed published without a date keep a stable order
+ * instead of shuffling on every render.
+ */
+function timeOf(value) { const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? null : parsed.getTime(); }
+export function sortStoriesByDate(stories) {
+  return [...(stories || [])].sort((a, b) => {
+    const published = (timeOf(b?.publishedAt) ?? -Infinity) - (timeOf(a?.publishedAt) ?? -Infinity);
+    return published || String(b?.addedAt || '').localeCompare(String(a?.addedAt || ''));
+  });
+}
+
+/**
  * A feed's identity, used to match a delivery against a subscription. Comparing whole URLs
  * would let `?utm_source=` or a missing trailing slash look like a different feed; comparing
  * only the host would let any page on a subscribed domain deliver as that subscription.
