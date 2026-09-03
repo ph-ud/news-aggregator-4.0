@@ -1,4 +1,4 @@
-import { normalizeStories, normalizeCreators, staleStoriesForReplace, staleCreatorsForReplace, addedByLabel, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from './src/data.js';
+import { normalizeStories, normalizeCreators, normalizeFeedItems, normalizeSubscription, staleStoriesForReplace, staleCreatorsForReplace, withoutFeedDuplicates, subscriptionForFeed, addedByLabel, provenanceLabel, originBadge, isFromFeed, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from './src/data.js';
 import { html, raw, SafeHtml } from './src/html.js';
 import { store } from './src/store.js';
 import { createAuthTools } from './src/auth-tools.js';
@@ -55,6 +55,7 @@ function icon(name) { const icons = {
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12.5 4.5 4.5L19 7"/></svg>',
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4.5" y="10.5" width="15" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg>',
   logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 8 6 12l4 4M6 12h9"/></svg>',
+  rss: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 18.5a1 1 0 1 0 0-.01"/><path d="M5 11a8 8 0 0 1 8 8"/><path d="M5 5a14 14 0 0 1 14 14"/></svg>',
 }; return raw(icons[name] || ''); }
 function toast(message) { const element = document.createElement('div'); element.className = 'toast'; element.textContent = message; toastRegion.append(element); setTimeout(() => element.remove(), 2800); }
 
@@ -129,8 +130,14 @@ function storiesForFolder() {
   const { stories } = library();
   if (state.activeFolder === 'all') return stories;
   if (state.activeFolder === 'saved') { const saved = new Set(library().saved.map((entry) => entry.storyId)); return stories.filter((story) => saved.has(story.id)); }
+  /* The origin is a shelf of its own: "what my subscriptions sent" and "what an assistant
+     found" are the two halves of this library, and a badge alone cannot be read in bulk. */
+  if (state.activeFolder === 'rss') return stories.filter(isFromFeed);
+  if (state.activeFolder === 'ai') return stories.filter((story) => !isFromFeed(story));
   return stories.filter((story) => (story.tagIds || []).includes(state.activeFolder));
 }
+function feedStories() { return library().stories.filter(isFromFeed); }
+function pendingFeeds() { return library().subscriptions.filter((entry) => !entry.feedUrl); }
 function folderCount(id) { return library().stories.filter((story) => (story.tagIds || []).includes(id)).length; }
 function savedFor(storyId) { return library().saved.find((entry) => entry.storyId === storyId); }
 function isSaved(storyId) { return Boolean(savedFor(storyId)); }
@@ -147,20 +154,66 @@ async function toggleSave(storyId) {
   return { saved: true, story };
 }
 
-async function toggleSubscription({ name, url, kind = 'blog', description = '' }) {
+/**
+ * Subscribing is the reader's decision and the only thing that turns a feed on: a feed URL
+ * sitting on a discovered creator delivers nothing until this runs. Unsubscribing leaves the
+ * stories the feed already delivered on the shelf — they were read, saved, and filed like any
+ * other, and silently deleting them would be a surprise, not a cleanup.
+ */
+async function toggleSubscription({ name, url, kind = 'blog', description = '', feedUrl = '' }) {
   requireAccount();
-  const host = hostOf(url);
-  if (!host) throw new Error('A subscription needs a valid https source URL.');
   const existing = subscriptionFor(url);
   if (existing) { await store.remove(existing.id); return { subscribed: false, subscription: existing }; }
-  const subscription = await store.put({ type: 'subscription', host, name: titleFor(name) || host, url: safeUrl(url), kind, description, addedAt: new Date().toISOString() });
+  const record = normalizeSubscription({ name: titleFor(name), url, host: hostOf(url), kind, description, feedUrl });
+  if (!record) throw new Error('A subscription needs a valid https source URL.');
+  const subscription = await store.put(record);
   return { subscribed: true, subscription };
+}
+
+/** Fills in the feed for a subscription made before its feed URL was known. */
+async function attachFeedUrl(url, feedUrl) {
+  requireAccount();
+  const existing = subscriptionFor(url);
+  if (!existing) throw new Error('That source is not in your subscriptions. Subscribe to it first.');
+  const feed = safeUrl(feedUrl);
+  if (feed === '#') throw new Error('A feed needs a valid https URL.');
+  return store.put({ ...existing, feedUrl: feed, feedStatus: 'active' });
+}
+
+/**
+ * File a batch of feed entries under the subscription they came from.
+ *
+ * The subscription lookup is the gate, not a convenience: an entry becomes an `rss` post
+ * only when the reader is actually subscribed to the feed that carried it. Anything else is
+ * refused outright rather than stored under the other origin — see `subscriptionForFeed`.
+ */
+async function deliverFeedItems(feedUrl, items) {
+  requireAccount();
+  const subscription = subscriptionForFeed(library().subscriptions, feedUrl);
+  if (!subscription) throw new Error('No subscription matches that feed URL. The reader subscribes first; a feed nobody subscribed to is not delivered.');
+  const fresh = normalizeFeedItems(subscription, items, library().stories);
+  if (fresh.length) await store.put(fresh);
+  await store.put({ ...subscription, lastFetchedAt: new Date().toISOString(), itemCount: (subscription.itemCount || 0) + fresh.length });
+  if (fresh.length) {
+    state.newStoryIds = fresh.map((story) => story.id);
+    /* Feed entries carry no shelf of their own, so a reader sitting on a topic shelf would be
+       told entries arrived and see nothing change. Move them to where the new ones actually
+       are, exactly as an injection moves them to the topic it just filled. */
+    if (!['all', 'rss'].includes(state.activeFolder)) state.activeFolder = 'rss';
+    setTimeout(() => { state.newStoryIds = []; render(); }, 900);
+  }
+  return { subscription, added: fresh.length, skipped: Math.max(0, (Array.isArray(items) ? items.length : 0) - fresh.length) };
 }
 
 async function injectNews(topic, stories, mode = 'replace') {
   requireAccount();
-  const normalized = normalizeStories(topic, stories);
-  if (!normalized.length) throw new Error('No valid stories were supplied. Each story needs a title, source, and https URL.');
+  const supplied = normalizeStories(topic, stories);
+  if (!supplied.length) throw new Error('No valid stories were supplied. Each story needs a title, source, and https URL.');
+  /* Where a subscription already carried the article, the publisher's own entry stands and
+     the summary of it is dropped: two cards for one link with two different badges reads as
+     a bug and weakens the badge everywhere else. */
+  const normalized = withoutFeedDuplicates(supplied, library().stories);
+  if (!normalized.length) throw new Error('Every story supplied is already on the shelf from a subscribed feed.');
   const enriched = [];
   for (const story of normalized) {
     const names = story.tags?.length ? story.tags : [story.category || topic];
@@ -186,7 +239,7 @@ async function injectNews(topic, stories, mode = 'replace') {
   state.view = 'library'; render();
   setTimeout(() => { state.newStoryIds = []; render(); }, 900);
   toast(`${enriched.length} ${enriched.length === 1 ? 'story' : 'stories'} added to your shelf.`);
-  return { topic, tags: [...new Set(enriched.flatMap((story) => story.tagNames))], mode, added: enriched.length, feedCount: library().stories.length, note: 'Stories are on the shelf but not saved yet — the reader saves each one with the Save button.' };
+  return { topic, tags: [...new Set(enriched.flatMap((story) => story.tagNames))], mode, added: enriched.length, skippedAlreadyInAFeed: supplied.length - normalized.length, feedCount: library().stories.length, via: 'ai', note: 'Stories are on the shelf but not saved yet — the reader saves each one with the Save button. They are labelled as AI-researched, distinct from entries the reader\'s own subscriptions deliver.' };
 }
 
 async function addCreators(topic, creators, mode = 'append') {
@@ -202,7 +255,7 @@ async function addCreators(topic, creators, mode = 'append') {
   if (incoming.length) await store.put(incoming);
   state.view = 'discover'; render();
   toast(`${incoming.length} ${incoming.length === 1 ? 'creator' : 'creators'} to explore.`);
-  return { topic, mode, added: incoming.length, creatorCount: library().creators.length, note: 'Nothing is subscribed automatically — the reader subscribes with the Subscribe button.' };
+  return { topic, mode, added: incoming.length, withFeeds: incoming.filter((creator) => creator.feedUrl).length, creatorCount: library().creators.length, note: 'Nothing is subscribed automatically — the reader subscribes with the Subscribe button, and a creator whose feedUrl you supplied starts delivering once they do.' };
 }
 
 async function updateSettings(patch) {
@@ -279,25 +332,37 @@ function folderRow(folder) { return html`<div class="folder-wrap"><button class=
 function sidebar() { const { stories: feed, saved, folders, subscriptions } = library(); const libraryActive = state.view === 'library'; return html`<aside class="sidebar"><a class="brand" href="#" data-action="open-all"><span>4.0</span><strong>reads</strong></a>
   <nav class="primary-nav" aria-label="Sections"><button class="nav-link ${libraryActive ? 'active' : ''}" data-action="open-all">${icon('book')}<span>Library</span></button><button class="nav-link ${state.view === 'discover' ? 'active' : ''}" data-action="open-discover">${icon('compass')}<span>Discover</span><b>${library().creators.length || ''}</b></button></nav>
   <div class="library-title"><span>Library</span><button data-action="new-folder" aria-label="Create shelf">${icon('plus')}</button></div>
-  <nav class="library" aria-label="Reading shelves"><button class="folder ${libraryActive && state.activeFolder === 'all' ? 'active' : ''}" data-action="open-all">${icon('inbox')}<span>All stories</span><b>${feed.length}</b></button><button class="folder ${libraryActive && state.activeFolder === 'saved' ? 'active' : ''}" data-action="open-saved">${icon('bookmark')}<span>Saved</span><b>${saved.length}</b></button>${folders.map(folderRow)}</nav>
+  <nav class="library" aria-label="Reading shelves"><button class="folder ${libraryActive && state.activeFolder === 'all' ? 'active' : ''}" data-action="open-all">${icon('inbox')}<span>All stories</span><b>${feed.length}</b></button><button class="folder ${libraryActive && state.activeFolder === 'rss' ? 'active' : ''}" data-action="open-rss">${icon('rss')}<span>From your feeds</span><b>${feedStories().length}</b></button><button class="folder ${libraryActive && state.activeFolder === 'ai' ? 'active' : ''}" data-action="open-ai">${icon('sparkle')}<span>Found by AI</span><b>${feed.length - feedStories().length}</b></button><button class="folder ${libraryActive && state.activeFolder === 'saved' ? 'active' : ''}" data-action="open-saved">${icon('bookmark')}<span>Saved</span><b>${saved.length}</b></button>${folders.map(folderRow)}</nav>
   <div class="library-title"><span>Subscriptions</span><b class="count-pill">${subscriptions.length}</b></div>
-  <nav class="library" aria-label="Subscriptions">${subscriptions.length ? subscriptions.slice(0, 6).map((entry) => html`<a class="folder sub-row" href="${safeUrl(entry.url)}" target="_blank" rel="noreferrer">${icon('bellFill')}<span>${entry.name}</span></a>`) : html`<p class="sidebar-empty">Subscribe from any story or creator card.</p>`}</nav>
+  <nav class="library" aria-label="Subscriptions">${subscriptions.length ? subscriptions.slice(0, 6).map((entry) => html`<a class="folder sub-row ${entry.feedUrl ? '' : 'sub-pending'}" href="${safeUrl(entry.url)}" target="_blank" rel="noreferrer">${icon(entry.feedUrl ? 'rss' : 'bellFill')}<span>${entry.name}</span>${entry.feedUrl ? '' : html`<b class="feed-flag" title="No feed URL yet">no feed</b>`}</a>`) : html`<p class="sidebar-empty">Subscribe from any story or creator card.</p>`}</nav>
   <div class="sidebar-spacer"></div>${accountChip()}</aside>`; }
 
 /* Records are researched by an assistant and handed to us; nothing here was fetched from a feed.
    Every surface that shows that text shows this, so agent-written prose is never mistaken for the
    publisher's own. */
-function provenanceTag(record) { return html`<span class="agent-tag">${icon('sparkle')}Added by ${addedByLabel(record)}</span>`; }
+function provenanceTag(record) { const feed = isFromFeed(record); return html`<span class="agent-tag ${feed ? 'agent-tag-rss' : ''}"><b class="origin-badge">${originBadge(record)}</b>${feed ? icon('rss') : icon('sparkle')}${provenanceLabel(record)}</span>`; }
 function faviconFor(story) { const host = hostOf(story.url); return host ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=96` : ''; }
 function storyImage(story) { return story.imageUrl ? safeUrl(story.imageUrl) : faviconFor(story); }
 function storyMeta(story) { return html`<div class="story-meta"><span>${story.source}</span><i></i><span>${date(story.publishedAt)}</span>${provenanceTag(story)}</div>`; }
 function cover(story, large = false) { const image = storyImage(story); const mark = initials(story.source); return html`<div class="cover ${large ? 'cover-large' : ''} ${story.imageUrl ? '' : 'cover-logo'}"><span>${mark}</span>${image ? html`<img src="${image}" alt="" loading="lazy" data-fallback="remove" />` : ''}</div>`; }
 function saveButton(story, wide = false) { const saved = isSaved(story.id); return html`<button class="pill-button ${saved ? 'is-on' : ''} ${wide ? 'pill-wide' : ''}" data-action="toggle-save" data-story="${story.id}" aria-pressed="${String(saved)}">${icon(saved ? 'bookmarkFill' : 'bookmark')}<span>${saved ? 'Saved' : 'Save'}</span></button>`; }
-function subscribeButton(source, wide = false) { const on = isSubscribed(source.url); return html`<button class="pill-button ${on ? 'is-on' : ''} ${wide ? 'pill-wide' : ''}" data-action="toggle-subscribe" data-url="${source.url}" data-name="${source.name}" data-kind="${source.kind || 'blog'}" aria-pressed="${String(on)}">${icon(on ? 'check' : 'bell')}<span>${on ? 'Subscribed' : 'Subscribe'}</span></button>`; }
-function storyActions(story, wide = false) { return html`<div class="card-actions">${saveButton(story, wide)}${subscribeButton({ url: story.url, name: story.source, kind: 'blog' }, wide)}</div>`; }
+/**
+ * Subscribe is the switch that turns a feed on. `feedUrl` rides along on the button because
+ * the card is where it is known — a creator the assistant researched carries one, a story
+ * card knows only its host — and a subscription made without one is kept as pending rather
+ * than refused, then labelled so the reader can see why nothing is arriving from it yet.
+ */
+function subscribeButton(source, wide = false) {
+  const existing = subscriptionFor(source.url);
+  const on = Boolean(existing);
+  const pending = on && !existing.feedUrl;
+  const label = pending ? 'Subscribed · no feed' : on ? 'Subscribed' : source.feedUrl ? 'Subscribe to RSS' : 'Subscribe';
+  return html`<button class="pill-button ${on ? 'is-on' : ''} ${pending ? 'is-pending' : ''} ${wide ? 'pill-wide' : ''}" data-action="toggle-subscribe" data-url="${source.url}" data-name="${source.name}" data-kind="${source.kind || 'blog'}" data-feed="${source.feedUrl || ''}" aria-pressed="${String(on)}" title="${pending ? 'Subscribed, but no feed URL is known yet — ask your assistant to find one.' : ''}">${icon(on ? (pending ? 'bell' : 'check') : source.feedUrl ? 'rss' : 'bell')}<span>${label}</span></button>`;
+}
+function storyActions(story, wide = false) { return html`<div class="card-actions">${saveButton(story, wide)}${subscribeButton({ url: story.url, name: story.source, kind: 'blog', feedUrl: story.feedUrl || '' }, wide)}</div>`; }
 
-function emptyFeed() { return html`<section class="empty-feed"><div class="empty-book">${icon('book')}</div><p class="eyebrow">A blank first page</p><h2>Save something worth staying with.</h2><p>Ask your assistant for news on a topic, or head to Discover to find blogs and independent creators worth following.</p><span class="empty-hint">Sources, dates, and context stay attached.</span></section>`; }
-function storyCard(story, index) { const isNew = state.newStoryIds.includes(story.id); return html`<article class="story-card ${isNew ? 'story-arriving' : ''}" style="--arrival-index:${index}"><button class="cover-button" data-action="open-reader" data-story="${story.id}" aria-label="Open ${story.title}">${cover(story)}</button><div class="story-card-copy"><p class="story-kicker">${story.folderName || story.category || 'Reading'}</p><h3>${story.title}</h3><p class="summary">${story.summary}</p>${storyActions(story)}<footer>${storyMeta(story)}<button class="read-link" data-action="open-reader" data-story="${story.id}">Read ${icon('arrow')}</button></footer></div></article>`; }
+function emptyFeed() { return html`<section class="empty-feed"><div class="empty-book">${icon('rss')}</div><p class="eyebrow">A blank first page</p><h2>Subscribe to someone worth reading.</h2><p>Two things fill this shelf: feeds you subscribe to, which arrive as the publisher wrote them, and stories an assistant researches for you, which arrive as its summaries. Head to Discover to find people to follow, or ask for news on a topic.</p><span class="empty-hint">Every card says which of the two it is.</span></section>`; }
+function storyCard(story, index) { const isNew = state.newStoryIds.includes(story.id); return html`<article class="story-card ${isNew ? 'story-arriving' : ''} ${isFromFeed(story) ? 'story-rss' : 'story-ai'}" style="--arrival-index:${index}"><button class="cover-button" data-action="open-reader" data-story="${story.id}" aria-label="Open ${story.title}">${cover(story)}</button><div class="story-card-copy"><p class="story-kicker">${story.folderName || story.category || 'Reading'}</p><h3>${story.title}</h3><p class="summary">${story.summary}</p>${storyActions(story)}<footer>${storyMeta(story)}<button class="read-link" data-action="open-reader" data-story="${story.id}">Read ${icon('arrow')}</button></footer></div></article>`; }
 function continueCard(story) { return html`<section class="continue-card"><div class="continue-cover">${cover(story, true)}</div><div class="continue-copy"><p class="eyebrow">Continue reading</p><h2>${story.title}</h2><p class="continue-source">${story.source} <span>·</span> ${date(story.publishedAt)}</p>${provenanceTag(story)}<p class="summary">${story.summary}</p><div class="continue-actions"><button class="primary-button" data-action="open-reader" data-story="${story.id}">Open story ${icon('arrow')}</button>${storyActions(story)}</div></div></section>`; }
 
 function libraryView() {
@@ -310,7 +375,7 @@ function libraryView() {
   ${lead ? continueCard(lead) : emptyFeed()}
   <section class="shelf-heading"><div><p class="eyebrow">${heading}</p><h2>On your shelf</h2></div><span>${stories.length ? 'Newest first' : 'Nothing here yet'}</span></section>
   ${rest.length ? html`<section class="story-grid">${rest.map(storyCard)}</section>` : ''}</main>
-  <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Reading rhythm</p><div class="rhythm-number">${library().saved.length}</div><p>stories saved<br>from ${library().stories.length} on your shelf</p></div><div class="aside-block"><p class="eyebrow">Following</p><div class="rhythm-number">${library().subscriptions.length}</div><p>${library().subscriptions.length === 1 ? 'blog or creator' : 'blogs and creators'}<br>you subscribe to</p></div><div class="aside-block aside-note"><span>${icon('bookmark')}</span><p>Every story keeps its original source, publication date, and a direct path back to the reporting.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Library ready'}</div></aside></div>`;
+  <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Reading rhythm</p><div class="rhythm-number">${library().saved.length}</div><p>stories saved<br>from ${library().stories.length} on your shelf</p></div><div class="aside-block"><p class="eyebrow">Following</p><div class="rhythm-number">${library().subscriptions.length}</div><p>${library().subscriptions.length === 1 ? 'blog or creator' : 'blogs and creators'}<br>you subscribe to</p></div><div class="aside-block aside-note"><span>${icon('rss')}</span><p><strong>${feedStories().length}</strong> from your own subscriptions, <strong>${library().stories.length - feedStories().length}</strong> found by an assistant. Every card says which, because the words in one are the publisher's and in the other a model's.</p></div><div class="aside-block aside-note"><span>${icon('bookmark')}</span><p>Every story keeps its original source, publication date, and a direct path back to the reporting.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Library ready'}</div></aside></div>`;
 }
 
 function creatorCard(creator, index) { return html`<article class="creator-card" style="--arrival-index:${index}"><div class="creator-head"><div class="creator-mark">${initials(creator.name)}</div><div><h3>${creator.name}</h3><p class="creator-host"><em>${creator.kind}</em> <span>·</span> ${hostOf(creator.url) || 'source'}${creator.cadence ? html` <span>·</span> ${creator.cadence}` : ''}</p>${provenanceTag(creator)}</div></div><p class="summary">${creator.description}</p>${creator.whyRelevant ? html`<p class="creator-why">${icon('sparkle')}<span>${creator.whyRelevant}</span></p>` : ''}<div class="creator-topics">${creator.topics.map((topic) => html`<span>${topic}</span>`)}</div><div class="card-actions">${subscribeButton(creator)}<a class="read-link" href="${safeUrl(creator.url)}" target="_blank" rel="noreferrer">Visit ${icon('arrow')}</a></div></article>`; }
@@ -319,21 +384,27 @@ function discoverView() {
   return html`<div class="shell">${sidebar()}<main class="library-main"><header class="topbar"><span>${today()}</span><span class="page-count">${creators.length} ${creators.length === 1 ? 'creator' : 'creators'}</span></header>
   <section class="library-hero"><p class="eyebrow">Discover</p><h1>Find the people<br><em>worth following.</em></h1><p>Ask your assistant to research blogs, newsletters, and independent creators on a topic. They arrive here with their sources — you decide who to subscribe to.</p></section>
   ${creators.length ? html`<section class="shelf-heading"><div><p class="eyebrow">Researched for you</p><h2>Blogs &amp; creators</h2></div><span>${subscriptions.length} subscribed</span></section><section class="creator-grid">${creators.map(creatorCard)}</section>` : html`<section class="empty-feed"><div class="empty-book">${icon('compass')}</div><p class="eyebrow">Nothing discovered yet</p><h2>Who should you be reading?</h2><p>Try asking: <em>“find me three independent blogs about urban design”</em>. Results land here through the <code>discover-creators</code> WebMCP tool.</p><span class="empty-hint">The app never fetches or opens the links it is given.</span></section>`}
-  ${subscriptions.length ? html`<section class="shelf-heading"><div><p class="eyebrow">Your subscriptions</p><h2>Following</h2></div><span>Kept with your account</span></section><section class="sub-grid">${subscriptions.map((entry) => html`<div class="sub-card"><div class="creator-mark">${initials(entry.name)}</div><div class="sub-copy"><strong>${entry.name}</strong><small>${entry.host} · since ${date(entry.subscribedAt)}</small></div>${subscribeButton(entry)}</div>`)}</section>` : ''}</main>
+  ${subscriptions.length ? html`<section class="shelf-heading"><div><p class="eyebrow">Your subscriptions</p><h2>Following</h2></div><span>${subscriptions.filter((entry) => entry.feedUrl).length} of ${subscriptions.length} with a feed</span></section><section class="sub-grid">${subscriptions.map((entry) => html`<div class="sub-card ${entry.feedUrl ? '' : 'sub-card-pending'}"><div class="creator-mark">${initials(entry.name)}</div><div class="sub-copy"><strong>${entry.name}</strong><small>${entry.host} · since ${date(entry.addedAt)}</small><small class="sub-feed">${entry.feedUrl ? html`${icon('rss')} ${entry.lastFetchedAt ? html`last fetched ${date(entry.lastFetchedAt)}` : 'feed ready — nothing fetched yet'}` : html`No feed URL yet. Ask your assistant to find this site's RSS feed.`}</small></div>${subscribeButton(entry)}</div>`)}</section>` : ''}
+  ${pendingFeeds().length ? html`<section class="feed-help"><p class="eyebrow">${icon('rss')} How your feeds refresh</p><p>4.0-reads cannot fetch a feed from this page — browsers block a site from reading another site's feed, which is why hosted readers fetch on their own servers. This one keeps the fetch on your machine instead, so nothing about who you follow leaves it. Ask your assistant to run <code>node bin/rss-fetch.mjs --feeds -</code> against your subscribed feeds and hand the result back.</p></section>` : ''}</main>
   <aside class="library-aside"><div class="aside-block"><p class="eyebrow">Following</p><div class="rhythm-number">${subscriptions.length}</div><p>subscriptions saved<br>to ${store.profile.name}'s account</p></div><div class="aside-block aside-note"><span>${icon('sparkle')}</span><p>Discovery is research, not endorsement. Each card keeps the creator's own site so you can judge for yourself.</p></div><div class="aside-footer">${state.webmcp.supported ? `WebMCP ready · ${state.webmcp.registered} tools` : 'Discovery ready'}</div></aside></div>`;
 }
 
 function readerView(story) {
   const paragraphs = summaryParagraphs(story);
   const origin = hostOf(story.url) || story.source;
+  /* What this page may truthfully claim about the text below depends entirely on which
+     pipeline delivered it: a model's summary, or the publisher's own syndicated entry. */
+  const fromFeed = isFromFeed(story);
   const { theme, fontScale } = settings();
   return html`<div class="reader-page reader-theme-${theme}" style="--reader-scale:${fontScale}"><header class="reader-topbar"><button class="back-button" aria-label="Back to shelf" data-action="back-to-library">${icon('back')}<span>Back to shelf</span></button><div class="reader-title">${story.folderName || story.category || 'Saved story'}</div><div class="reader-tools"><button data-action="decrease-font" aria-label="Decrease text size">A−</button><button data-action="increase-font" aria-label="Increase text size">A+</button><button data-action="toggle-theme" aria-label="Toggle reading theme">${theme === 'night' ? icon('sun') : icon('moon')}</button><a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer" class="source-link">Source ${icon('arrow')}</a></div></header>
   <div class="reading-progress"><span style="width:32%"></span></div>
-  <div class="reader-layout"><aside class="reader-rail"><p class="eyebrow">On this page</p><ol><li class="active">Summary</li><li>Source notes</li></ol><div class="rail-rule"></div><span class="rail-meta">${date(story.publishedAt, { month: 'long', day: 'numeric', year: 'numeric' })}</span><span class="rail-meta">Summary · ${summaryLength(story)}</span></aside>
-  <article class="article"><p class="eyebrow">${story.source} <span class="eyebrow-dot">·</span> ${date(story.publishedAt)}</p><h1>${story.title}</h1><p class="article-dek">What ${addedByLabel(story)} wrote about this story when it was added to the shelf (${date(story.addedAt, { month: 'long', day: 'numeric', year: 'numeric' })}). The reporting itself stays at ${story.source}.</p><div class="article-rule"></div>
-  <p class="article-notice">${icon('sparkle')}<span>You are reading a summary written by ${addedByLabel(story)}, not ${story.source}'s article. 4.0-reads never fetches or stores article text — <a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">read the original at ${origin}</a>.</span></p>
-  <div class="article-body"><p class="dropcap">${paragraphs[0]}</p>${paragraphs.slice(1).map((paragraph) => html`<p>${paragraph}</p>`)}<h2>Source notes</h2><p>4.0-reads keeps this story's link, source name, and publication date — never the article body, which it has no way to retrieve. Read the full reporting at <a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">${story.source}</a>.</p></div><footer class="article-footer"><button data-action="back-to-library">${icon('back')} Back to shelf</button><a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">Read original ${icon('arrow')}</a></footer></article>
-  <aside class="reader-side"><div class="reader-cover">${cover(story, true)}</div><p class="side-label">Saved in</p><strong>${story.folderName || story.category || 'All stories'}</strong><div class="side-rule"></div><div class="side-actions">${saveButton(story, true)}${subscribeButton({ url: story.url, name: story.source }, true)}</div><p class="side-caption">Saving keeps it on ${store.profile.name}'s shelf. Subscribing follows everything from ${hostOf(story.url) || story.source}.</p></aside></div></div>`;
+  <div class="reader-layout"><aside class="reader-rail"><p class="eyebrow">On this page</p><ol><li class="active">Summary</li><li>Source notes</li></ol><div class="rail-rule"></div><span class="rail-meta">${date(story.publishedAt, { month: 'long', day: 'numeric', year: 'numeric' })}</span><span class="rail-meta">${fromFeed ? 'Feed entry' : 'Summary'} · ${summaryLength(story)}</span><span class="rail-meta rail-origin">${originBadge(story)} · ${fromFeed ? 'your subscription' : 'AI research'}</span></aside>
+  <article class="article"><p class="eyebrow">${story.source} <span class="eyebrow-dot">·</span> ${date(story.publishedAt)}</p><h1>${story.title}</h1><p class="article-dek">${fromFeed ? html`The entry as ${story.source} syndicated it in their feed, fetched on ${date(story.addedAt, { month: 'long', day: 'numeric', year: 'numeric' })}. The full article stays at ${story.source}.` : html`What ${addedByLabel(story)} wrote about this story when it was added to the shelf (${date(story.addedAt, { month: 'long', day: 'numeric', year: 'numeric' })}). The reporting itself stays at ${story.source}.`}</p><div class="article-rule"></div>
+  ${fromFeed
+    ? html`<p class="article-notice article-notice-rss">${icon('rss')}<span>This is ${story.source}'s own feed entry, not a summary of it — whatever they chose to syndicate is what you see here. It may be the whole post or an excerpt; 4.0-reads never fetches the article page — <a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">read it at ${origin}</a>.</span></p>`
+    : html`<p class="article-notice">${icon('sparkle')}<span>You are reading a summary written by ${addedByLabel(story)}, not ${story.source}'s article. 4.0-reads never fetches or stores article text — <a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">read the original at ${origin}</a>.</span></p>`}
+  <div class="article-body"><p class="dropcap">${paragraphs[0]}</p>${paragraphs.slice(1).map((paragraph) => html`<p>${paragraph}</p>`)}<h2>Source notes</h2><p>${fromFeed ? html`This entry arrived through your subscription to ${story.source}, fetched from their feed on your own machine and stored encrypted in your account. 4.0-reads keeps what the feed carried — never the article page, which it does not open. Read the full post at ` : html`4.0-reads keeps this story's link, source name, and publication date — never the article body, which it has no way to retrieve. Read the full reporting at `}<a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">${story.source}</a>.</p></div><footer class="article-footer"><button data-action="back-to-library">${icon('back')} Back to shelf</button><a href="${safeUrl(story.url)}" target="_blank" rel="noreferrer">Read original ${icon('arrow')}</a></footer></article>
+  <aside class="reader-side"><div class="reader-cover">${cover(story, true)}</div><p class="side-label">Saved in</p><strong>${story.folderName || story.category || 'All stories'}</strong><div class="side-rule"></div><div class="side-actions">${saveButton(story, true)}${subscribeButton({ url: story.url, name: story.source, feedUrl: story.feedUrl || '' }, true)}</div><p class="side-caption">Saving keeps it on ${store.profile.name}'s shelf. ${fromFeed ? html`This came from your subscription to ${hostOf(story.url) || story.source}.` : html`Subscribing follows everything from ${hostOf(story.url) || story.source}.`}</p></aside></div></div>`;
 }
 
 /**
@@ -383,8 +454,8 @@ function reportError(error) { toast(error.message); render(); }
 const UNTRUSTED = { untrustedContentHint: true };
 function accountSnapshot() {
   return store.signedIn
-    ? { signedIn: true, needsNewPassphrase: store.needsNewPassphrase, account: { name: store.profile.name, email: store.profile.email }, storyCount: library().stories.length, savedCount: library().saved.length, subscriptionCount: library().subscriptions.length, creatorCount: library().creators.length }
-    : { signedIn: false, needsNewPassphrase: false, account: null, storyCount: 0, savedCount: 0, subscriptionCount: 0, creatorCount: 0 };
+    ? { signedIn: true, needsNewPassphrase: store.needsNewPassphrase, account: { name: store.profile.name, email: store.profile.email }, storyCount: library().stories.length, fromFeedsCount: feedStories().length, foundByAiCount: library().stories.length - feedStories().length, savedCount: library().saved.length, subscriptionCount: library().subscriptions.length, feedsNeedingUrl: pendingFeeds().length, creatorCount: library().creators.length }
+    : { signedIn: false, needsNewPassphrase: false, account: null, storyCount: 0, fromFeedsCount: 0, foundByAiCount: 0, savedCount: 0, subscriptionCount: 0, feedsNeedingUrl: 0, creatorCount: 0 };
 }
 
 async function registerWebMcpTools() {
@@ -405,7 +476,7 @@ async function registerWebMcpTools() {
       category: { type: 'string', description: 'Short topical label used as the shelf kicker, e.g. "Energy".' },
     }, required: ['title', 'source', 'url', 'summary'], additionalProperties: false } } }, required: ['topic', 'stories'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: true }, execute: async ({ topic, stories, mode = 'replace' }) => injectNews(topic, stories, mode) },
 
-    { name: 'discover-creators', title: 'Suggest blogs and creators to follow', description: 'Add researched blogs, newsletters, podcasts, and independent creators to the reader\'s Discover page. Requires a signed-in account. Favor primary homepages over aggregator profiles, verify the site is still publishing, and say plainly in whyRelevant what makes each one a fit. Nothing is subscribed automatically: the reader presses Subscribe. mode: "replace" only replaces creators discovered for this exact topic, never the whole Discover page. The app never fetches or opens the links you supply.', inputSchema: { type: 'object', properties: { topic: { type: 'string', maxLength: 120 }, mode: { type: 'string', enum: ['replace', 'append'] }, creators: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' }, feedUrl: { type: 'string' }, handle: { type: 'string' }, kind: { type: 'string', enum: ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'] }, cadence: { type: 'string' }, description: { type: 'string' }, whyRelevant: { type: 'string' }, topics: { type: 'array', maxItems: 4, items: { type: 'string' } } }, required: ['name', 'url'], additionalProperties: false } } }, required: ['topic', 'creators'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: true }, execute: async ({ topic, creators, mode = 'append' }) => addCreators(topic, creators, mode) },
+    { name: 'discover-creators', title: 'Suggest blogs and creators to follow', description: 'Add researched blogs, newsletters, podcasts, and independent creators to the reader\'s Discover page. Requires a signed-in account. Favor primary homepages over aggregator profiles, verify the site is still publishing, and say plainly in whyRelevant what makes each one a fit. Nothing is subscribed automatically: the reader presses Subscribe. Always supply feedUrl when the creator publishes an RSS or Atom feed — it is what turns their Subscribe button into a live subscription, and a creator discovered without one can only be followed dormantly until someone finds their feed. mode: "replace" only replaces creators discovered for this exact topic, never the whole Discover page. The app never fetches or opens the links you supply.', inputSchema: { type: 'object', properties: { topic: { type: 'string', maxLength: 120 }, mode: { type: 'string', enum: ['replace', 'append'] }, creators: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' }, feedUrl: { type: 'string' }, handle: { type: 'string' }, kind: { type: 'string', enum: ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'] }, cadence: { type: 'string' }, description: { type: 'string' }, whyRelevant: { type: 'string' }, topics: { type: 'array', maxItems: 4, items: { type: 'string' } } }, required: ['name', 'url'], additionalProperties: false } } }, required: ['topic', 'creators'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: true }, execute: async ({ topic, creators, mode = 'append' }) => addCreators(topic, creators, mode) },
 
     { name: 'get-current-feed', title: 'Read the 4.0-reads library', description: 'Read the signed-in reader\'s stories, shelves, saved stories, subscriptions, and discovered creators. Read-only. This decrypts in the page, so it works only while the reader is signed in on this device.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, ...UNTRUSTED }, execute: async () => ({ ...accountSnapshot(), ...library() }) },
 
@@ -419,12 +490,50 @@ async function registerWebMcpTools() {
       return { saved: true, title: story.title, savedCount: library().saved.length };
     } },
 
-    { name: 'subscribe-to-source', title: 'Subscribe to a blog, creator, or source', description: 'Follow a blog, newsletter, or creator in the reader\'s account. Requires a signed-in account. Use the creator\'s own https homepage; one subscription is kept per site.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' }, kind: { type: 'string', enum: ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'] }, description: { type: 'string' } }, required: ['name', 'url'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: false, idempotentHint: true }, execute: async ({ name, url, kind = 'blog', description = '' }) => {
+    { name: 'subscribe-to-source', title: 'Subscribe to a blog, creator, or source', description: 'Follow a blog, newsletter, or creator in the reader\'s account. Requires a signed-in account. Use the creator\'s own https homepage; one subscription is kept per site. Supply feedUrl whenever you know the site\'s RSS or Atom feed — that is what makes the subscription deliver anything. A subscription without one is kept but stays dormant until attach-feed-url gives it a feed. Subscribing does not fetch: the reader\'s own machine does that, and the entries come back through deliver-rss-items.', inputSchema: { type: 'object', properties: { name: { type: 'string' }, url: { type: 'string' }, feedUrl: { type: 'string', description: 'The site\'s RSS or Atom feed URL, if you know it. The subscription delivers nothing without one.' }, kind: { type: 'string', enum: ['blog', 'newsletter', 'podcast', 'video', 'magazine', 'independent'] }, description: { type: 'string' } }, required: ['name', 'url'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: false, idempotentHint: true }, execute: async ({ name, url, kind = 'blog', description = '', feedUrl = '' }) => {
       requireAccount();
-      if (isSubscribed(url)) return { subscribed: true, alreadySubscribed: true, name: subscriptionFor(url).name };
-      const result = await toggleSubscription({ name, url, kind, description }); render();
+      if (isSubscribed(url)) { const existing = subscriptionFor(url); return { subscribed: true, alreadySubscribed: true, name: existing.name, feedUrl: existing.feedUrl, needsFeedUrl: !existing.feedUrl }; }
+      const result = await toggleSubscription({ name, url, kind, description, feedUrl }); render();
       toast(`Subscribed to ${result.subscription.name}.`);
-      return { subscribed: true, name: result.subscription.name, subscriptionCount: library().subscriptions.length };
+      return { subscribed: true, name: result.subscription.name, feedUrl: result.subscription.feedUrl, needsFeedUrl: !result.subscription.feedUrl, subscriptionCount: library().subscriptions.length };
+    } },
+
+    /* The RSS half of the library. The page cannot fetch a feed — a browser will not let it
+       read another origin's document, which is why hosted readers fetch server-side — and
+       putting the fetcher on our server would tell our server who each reader follows. So
+       the fetch runs on the reader's own machine, exactly as a desktop reader does, and
+       these two tools are the ends of that pipe: one says which feeds to fetch, the other
+       takes the result back. */
+    { name: 'list-subscription-feeds', title: 'List the reader\'s subscribed RSS feeds', description: 'List the feed URLs the reader is subscribed to, so they can be fetched and delivered with deliver-rss-items. Read-only. This page cannot fetch feeds itself: a browser blocks a page from reading another site\'s feed, and this app deliberately keeps feed fetching off its own server so that no server learns who the reader follows. Run the repository\'s bin/rss-fetch.mjs on the reader\'s machine against these URLs — it prints one ready-made deliver-rss-items argument object per feed — or fetch them yourself and pass the entries through unchanged. Subscriptions listed with no feedUrl need one: find the site\'s real feed and call attach-feed-url.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, ...UNTRUSTED }, execute: async () => {
+      requireAccount();
+      const subs = library().subscriptions;
+      return {
+        feeds: subs.filter((entry) => entry.feedUrl).map((entry) => ({ name: entry.name, host: entry.host, feedUrl: entry.feedUrl, siteUrl: entry.url, lastFetchedAt: entry.lastFetchedAt || '' })),
+        needingFeedUrl: subs.filter((entry) => !entry.feedUrl).map((entry) => ({ name: entry.name, host: entry.host, siteUrl: entry.url })),
+        command: 'node bin/rss-fetch.mjs --feeds -   # pipe this tool\'s JSON output in',
+        note: 'Fetch these on the reader\'s own machine. Deliver each feed\'s entries with deliver-rss-items, using the same feedUrl listed here.',
+      };
+    } },
+
+    { name: 'deliver-rss-items', title: 'Deliver entries from a subscribed RSS feed', description: 'File entries fetched from one of the reader\'s subscribed feeds onto their shelf, labelled as coming from that subscription rather than from your research. Requires a signed-in account. The feedUrl must match a feed the reader has actually subscribed to — get it from list-subscription-feeds — and a feed nobody subscribed to is refused, not stored under another label. Pass each entry as the feed published it: do not rewrite titles, do not summarize, and do not invent a description for an entry that has none. Entries already on the shelf are skipped by guid or URL, so re-delivering a whole feed is safe.', inputSchema: { type: 'object', properties: { feedUrl: { type: 'string', description: 'The subscribed feed this batch came from, exactly as list-subscription-feeds gave it.' }, items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'object', properties: {
+      title: { type: 'string', description: 'The entry\'s own title from the feed.' },
+      url: { type: 'string', description: 'The entry\'s link, as the feed gave it.' },
+      guid: { type: 'string', description: 'The feed\'s guid or id for this entry, used to avoid storing it twice.' },
+      publishedAt: { type: 'string', description: 'The entry\'s own date from the feed, as ISO 8601.' },
+      summary: { type: 'string', maxLength: SUMMARY_LIMIT, description: 'The entry\'s description or content as the publisher syndicated it, with markup stripped. Not your summary of it.' },
+      author: { type: 'string', description: 'The entry\'s author, if the feed names one.' },
+      imageUrl: { type: 'string', description: 'An image the entry itself references, if any.' },
+    }, required: ['title', 'url'], additionalProperties: false } } }, required: ['feedUrl', 'items'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: false }, execute: async ({ feedUrl, items }) => {
+      const result = await deliverFeedItems(feedUrl, items);
+      state.view = 'library'; render();
+      if (result.added) toast(`${result.added} new ${result.added === 1 ? 'entry' : 'entries'} from ${result.subscription.name}.`);
+      return { feed: result.subscription.name, added: result.added, skippedAlreadyOnShelf: result.skipped, via: 'rss', storyCount: library().stories.length, note: 'Filed as feed entries from the reader\'s own subscription, shown as the publisher\'s text rather than as an assistant\'s summary.' };
+    } },
+
+    { name: 'attach-feed-url', title: 'Attach an RSS feed URL to a subscription', description: 'Give an existing subscription its RSS or Atom feed URL, so it can start delivering entries. Requires a signed-in account. Use when list-subscription-feeds reports a subscription under needingFeedUrl: find the site\'s real feed URL and pass it here. Verify it is the feed itself, not the page that links to it.', inputSchema: { type: 'object', properties: { url: { type: 'string', description: 'The subscribed site, matching the subscription.' }, feedUrl: { type: 'string', description: 'The https URL of that site\'s RSS or Atom feed.' } }, required: ['url', 'feedUrl'], additionalProperties: false }, annotations: { ...UNTRUSTED, destructiveHint: false, idempotentHint: true }, execute: async ({ url, feedUrl }) => {
+      const subscription = await attachFeedUrl(url, feedUrl); render();
+      toast(`${subscription.name} is ready to fetch.`);
+      return { name: subscription.name, feedUrl: subscription.feedUrl, note: 'Nothing is fetched by this app. Fetch the feed on the reader\'s machine and return the entries with deliver-rss-items.' };
     } },
 
     { name: 'unsubscribe-from-source', title: 'Unsubscribe from a source', description: 'Stop following a blog, newsletter, or creator in the reader\'s account. Requires a signed-in account.', inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'], additionalProperties: false }, annotations: { destructiveHint: true }, execute: async ({ url }) => {
@@ -562,7 +671,7 @@ document.addEventListener('change', (event) => {
 document.addEventListener('click', async (event) => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
-  const { action, folder, story, url, name, kind, mode } = button.dataset;
+  const { action, folder, story, url, name, kind, mode, feed } = button.dataset;
 
   if (action === 'noop') { event.preventDefault(); return; }
   /* Owned by the change listener; re-rendering here would clear the checkbox. */
@@ -584,6 +693,8 @@ document.addEventListener('click', async (event) => {
 
   if (action === 'open-all') { event.preventDefault(); state.activeFolder = 'all'; state.view = 'library'; }
   if (action === 'open-saved') { state.activeFolder = 'saved'; state.view = 'library'; }
+  if (action === 'open-rss') { state.activeFolder = 'rss'; state.view = 'library'; }
+  if (action === 'open-ai') { state.activeFolder = 'ai'; state.view = 'library'; }
   if (action === 'open-discover') { state.view = 'discover'; }
   if (action === 'open-account') { state.view = 'account'; }
   if (action === 'open-folder') { state.activeFolder = folder; state.view = 'library'; }
@@ -598,7 +709,11 @@ document.addEventListener('click', async (event) => {
     catch (error) { toast(error.message); }
   }
   if (action === 'toggle-subscribe') {
-    try { const result = await toggleSubscription({ name, url, kind }); toast(result.subscribed ? `Subscribed to ${result.subscription.name}.` : `Unsubscribed from ${result.subscription.name}.`); }
+    try {
+      const result = await toggleSubscription({ name, url, kind, feedUrl: feed });
+      if (!result.subscribed) toast(`Unsubscribed from ${result.subscription.name}. Everything it already sent stays on your shelf.`);
+      else toast(result.subscription.feedUrl ? `Subscribed to ${result.subscription.name}'s feed.` : `Subscribed to ${result.subscription.name}. No feed URL yet — ask your assistant to find one.`);
+    }
     catch (error) { toast(error.message); }
   }
   if (action === 'new-folder') {

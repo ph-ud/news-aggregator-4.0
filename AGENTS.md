@@ -9,6 +9,8 @@ This repository is a WebMCP-powered reading library for the WebMCP Challenge. Ke
 - `src/store.js` — the encrypted sync client: sign-in, sync, and the decrypted library the UI reads.
 - `src/keystore.js` — persists the unwrapped master key across reloads as a non-extractable `CryptoKey`.
 - `src/data.js` — normalization, URL validation, deduplication, and source metadata for stories and creators.
+- `src/rss.js` — the feed parser (RSS 2.0, Atom, RDF). Pure; it runs in the fetcher script, never in the page.
+- `bin/rss-fetch.mjs` — the local feed fetcher an agent runs on the reader's machine.
 - `src/auth-tools.js` — the WebMCP login tools, kept out of `app.js` so their shape is testable without a browser.
 - `src/credentials.js` — the browser password manager integration (Credential Management API).
 - `src/passkeys.js` — passkey enrolment and unlock. `server/webauthn.mjs` — assertion verification.
@@ -17,6 +19,67 @@ This repository is a WebMCP-powered reading library for the WebMCP Challenge. Ke
 - `tests/` — crypto unit tests, API integration tests, login-tool tests, passkey and WebAuthn verification tests, and normalization tests for untrusted agent input.
 
 Keep WebMCP handlers narrow, typed, and safe. ChatGPT searches the web; 4.0-reads only receives selected, structured records through `inject-news-to-feed` and `discover-creators`.
+
+## Two Pipelines, One Shelf
+
+The library is an RSS reader with an assistant attached, not the other way round. Subscriptions
+are the baseline: a feed the reader subscribed to delivers the publisher's own entries. The AI
+tools are the discovery layer on top — they find authors worth following and research stories on
+a topic, and what they deliver is a model's prose about reporting this app has never fetched.
+
+Every story therefore carries `via`, either `rss` or `ai`, and the distinction is enforced rather
+than advisory:
+
+- **`via` is stamped by the normalizer, never read from the payload.** `normalizeStories`
+  hard-codes `ai`, `normalizeFeedItems` hard-codes `rss`, and neither tool schema exposes the
+  field — both set `additionalProperties: false` so it cannot ride along with the real ones. A
+  caller that could set its own `via` could label an invented story as syndicated reporting,
+  which is exactly the claim the badge exists to make trustworthy.
+- **An entry is `rss` only under a feed the reader subscribed to.** `subscriptionForFeed` matches
+  on host plus path, so neither a query string nor a sibling page on a subscribed domain passes.
+  A feed nobody subscribed to is **refused, not relabelled**: quietly storing it as `ai` would
+  turn a rejected claim into an accepted one under another name.
+- **The wording differs because the truth differs.** `provenanceLabel` says "Added by ChatGPT"
+  over a model's summary and "From X's feed" over a publisher's own entry, and the reader page
+  swaps its notice and its source notes to match. Telling a reader that a publisher's syndicated
+  post was written by an assistant is the same class of error as passing a summary off as the
+  article.
+- **A `replace` never crosses the line.** `staleStoriesForReplace` only considers `ai` stories,
+  or an AI refresh on a topic sharing a subscription's name would clear a shelf the reader
+  subscribed to.
+- **One link, one card.** `withoutFeedDuplicates` drops an incoming AI story whose URL a
+  subscription already delivered; the publisher's own entry wins over a summary of it.
+- Records stored before `via` existed default to `ai`, which is what they were.
+
+## Fetching Feeds Without a Server
+
+A desktop reader polls feeds locally and nothing about the reader's subscriptions leaves their
+computer. This app gets the same property a different way, because a web page cannot do what
+NetNewsWire does:
+
+- **A page cannot fetch a feed.** Reading `https://someblog.example/feed.xml` from our origin
+  needs `Access-Control-Allow-Origin` on the feed, and almost no feed sends one; `no-cors` returns
+  an opaque response nothing can parse. This is why every hosted reader — Feedly, Inoreader,
+  NewsBlur — fetches server-side. It is a browser rule, not something this codebase can route
+  around, and widening `connect-src` would not fix it while opening the exfiltration path the
+  CSP exists to close.
+- **A fetcher on our server was rejected.** It works, but the server would learn exactly which
+  publications each account follows — the one fact the record encryption is designed to withhold,
+  and the same leak as the `creator-<host>` record id that rule already forbids.
+- **So the fetch runs on the reader's machine.** `bin/rss-fetch.mjs` takes the feed URLs from
+  `list-subscription-feeds`, fetches and parses them locally, and prints one ready-made
+  `deliver-rss-items` argument object per feed. An agent runs it and hands the result back. The
+  server sees ciphertext, as it does for everything else, and `connect-src 'self'` is untouched.
+- **Feed text is untrusted input like any other.** `src/rss.js` extracts strings and evaluates
+  nothing; `normalizeFeedItems` then trims, validates URLs, and strips markup, exactly as the
+  agent-facing normalizers do. `source` and `feedUrl` come from the *subscription*, never from
+  the payload, so a delivery cannot attribute an entry to a publication the reader never followed.
+- **A subscription with no feed is kept, not refused.** A story card knows an article's host and
+  nothing else, and who to follow is the reader's decision — the part only they can make. Such a
+  subscription is `pending`, shows as "no feed", delivers nothing, and an assistant can fill in
+  the feed later with `attach-feed-url`.
+- **Unsubscribing leaves delivered stories on the shelf.** They were read, saved, and filed like
+  any others; deleting them would be a surprise rather than a cleanup.
 
 ## Accounts and Encryption
 
@@ -220,7 +283,15 @@ That makes attribution a correctness requirement, not a courtesy:
 - **Every view that renders agent-written prose renders `provenanceTag()` beside it.** `addedByLabel()` in `src/data.js` supplies the wording and falls back to "an assistant" for records stored before the field existed, so a card can never read as the publisher's own. A test asserts each card view calls it.
 - **The reader page must never present the summary as the article.** It carries `.article-notice` saying so in as many words, and its dek names the assistant and the date the record was added — not the publication date, which belongs to the reporting.
 - **Never state a fact about text we do not hold.** The reader page shows the summary's word count; the "12 min read" it used to show was a claim about an article the app has never seen. A test keeps both that string and the old dek from returning.
-- `discover-creators` accepts a `feedUrl` and `src/data.js` validates it, but nothing reads it back. Adding a fetcher would change the threat model this app is built on — article images are already agent-chosen, and `connect-src 'self'` exists so decrypted content cannot leave the page.
+- **Feed entries are the exception, and they say so.** A subscription's entries are the
+  publisher's own syndicated text, so `provenanceLabel` credits the publication rather than an
+  assistant and the reader page drops the "written by an assistant" notice for one saying this
+  is the feed entry as published. What stays true for both: the app never fetches the article
+  *page*, and never claims to hold text it does not have.
+- `discover-creators` accepts a `feedUrl`, and it is now load-bearing: it is what the Subscribe
+  button turns into a live subscription. Nothing in the page fetches it even so — the fetch
+  happens on the reader's machine, and `connect-src 'self'` still exists so decrypted content
+  cannot leave the page.
 
 ## Story Quality
 

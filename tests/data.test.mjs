@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeStories, normalizeCreators, staleStoriesForReplace, staleCreatorsForReplace, addedByLabel, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
+import { normalizeStories, normalizeCreators, normalizeFeedItems, normalizeSubscription, staleStoriesForReplace, staleCreatorsForReplace, withoutFeedDuplicates, subscriptionForFeed, originOf, isFromFeed, addedByLabel, provenanceLabel, originBadge, summaryParagraphs, summaryLength, SUMMARY_LIMIT } from '../src/data.js';
 
 test('normalizes agent-supplied news while preserving provenance', () => {
   const stories = normalizeStories('fusion energy', [{ title: 'Fusion update', source: 'Example News', url: 'https://example.com/fusion', publishedAt: '2026-08-26T10:00:00Z', summary: 'A concise update.' }]);
@@ -108,4 +108,132 @@ test('a creator replace only drops creators discovered for that same topic', () 
   ];
   const stale = staleCreatorsForReplace(existing, 'urban design');
   assert.deepEqual(stale.map((creator) => creator.id), ['a']);
+});
+
+/* ---------- RSS: the origin distinction, and the enforcement behind it ---------- */
+
+const subscription = { id: 'sub-1', type: 'subscription', name: 'Street Notes', host: 'streetnotes.example', url: 'https://streetnotes.example', feedUrl: 'https://streetnotes.example/feed.xml', kind: 'blog' };
+const entry = (over = {}) => ({ title: 'Bus lanes', url: 'https://streetnotes.example/bus-lanes', guid: 'sn-1', publishedAt: '2026-09-01T09:00:00Z', summary: 'A post about bus lanes.', ...over });
+
+test('stamps the pipeline that delivered a story, and never takes it from the payload', () => {
+  const [researched] = normalizeStories('fusion', [{ title: 'T', source: 'S', url: 'https://example.com/a', summary: 'x' }]);
+  assert.equal(researched.via, 'ai');
+  const [delivered] = normalizeFeedItems(subscription, [entry()]);
+  assert.equal(delivered.via, 'rss');
+
+  /* The claim "a publisher syndicated this" is the whole value of the badge, so a caller must
+     not be able to make it. Both normalizers ignore a via they are handed. */
+  const [forgedRss] = normalizeStories('fusion', [{ title: 'T', source: 'S', url: 'https://example.com/b', summary: 'x', via: 'rss' }]);
+  assert.equal(forgedRss.via, 'ai', 'an AI story cannot label itself as coming from a feed');
+  const [forgedAi] = normalizeFeedItems(subscription, [entry({ via: 'ai' })]);
+  assert.equal(forgedAi.via, 'rss');
+});
+
+test('reads the origin of records stored before the field existed as AI', () => {
+  assert.equal(originOf({}), 'ai');
+  assert.equal(originOf(undefined), 'ai');
+  assert.equal(originOf({ via: 'rss' }), 'rss');
+  assert.equal(originOf({ via: 'nonsense' }), 'ai', 'anything unrecognized is not a feed entry');
+  assert.equal(isFromFeed({ via: 'rss' }), true);
+  assert.equal(isFromFeed({ via: 'ai' }), false);
+});
+
+test('files feed entries only under a feed the reader actually subscribed to', () => {
+  const subs = [subscription];
+  assert.equal(subscriptionForFeed(subs, 'https://streetnotes.example/feed.xml'), subscription);
+  /* Tracking parameters and a trailing slash are the same feed. */
+  assert.equal(subscriptionForFeed(subs, 'https://www.streetnotes.example/feed.xml/?utm_source=x'), subscription);
+  /* A different path on a subscribed host is not the subscribed feed. */
+  assert.equal(subscriptionForFeed(subs, 'https://streetnotes.example/other.xml'), null);
+  assert.equal(subscriptionForFeed(subs, 'https://elsewhere.example/feed.xml'), null);
+  assert.equal(subscriptionForFeed(subs, 'javascript:alert(1)'), null);
+  assert.equal(subscriptionForFeed(subs, ''), null);
+  assert.equal(subscriptionForFeed([], 'https://streetnotes.example/feed.xml'), null);
+  /* A pending subscription has no feed, so nothing may be filed under it. */
+  assert.equal(subscriptionForFeed([{ ...subscription, feedUrl: '' }], ''), null);
+});
+
+test('attributes a feed entry to the subscription, never to the payload', () => {
+  /* Otherwise a delivery could put an entry on the shelf under a masthead the reader trusts. */
+  const [story] = normalizeFeedItems(subscription, [entry({ source: 'Reuters', feedUrl: 'https://elsewhere.example/feed' })]);
+  assert.equal(story.source, 'Street Notes');
+  assert.equal(story.feedUrl, 'https://streetnotes.example/feed.xml');
+  assert.equal(story.subscriptionId, 'sub-1');
+});
+
+test('rejects feed entries with no title or no valid URL', () => {
+  const items = normalizeFeedItems(subscription, [entry({ title: '' }), entry({ url: 'javascript:alert(1)' }), entry({ url: 'https://streetnotes.example/ok' })]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].url, 'https://streetnotes.example/ok');
+});
+
+test('skips entries already on the shelf, because a feed re-lists everything every fetch', () => {
+  const existing = [{ via: 'rss', guid: 'sn-1', url: 'https://streetnotes.example/bus-lanes' }];
+  assert.equal(normalizeFeedItems(subscription, [entry()], existing).length, 0, 'same guid');
+  /* A feed that changed an entry's guid but not its link is still the same post. */
+  assert.equal(normalizeFeedItems(subscription, [entry({ guid: 'changed' })], existing).length, 0, 'same url');
+  assert.equal(normalizeFeedItems(subscription, [entry({ guid: 'sn-2', url: 'https://streetnotes.example/new' })], existing).length, 1);
+  /* And twice within one batch is once. */
+  assert.equal(normalizeFeedItems(subscription, [entry(), entry()]).length, 1);
+});
+
+test('a feed entry with no description says so rather than borrowing a summary', () => {
+  const [story] = normalizeFeedItems(subscription, [entry({ summary: '' })]);
+  assert.equal(story.summary, 'Street Notes published this entry without a description in their feed.');
+  assert.equal(story.addedBy, '', 'a feed entry was not added by an assistant');
+});
+
+test('a subscription with no feed delivers nothing', () => {
+  assert.deepEqual(normalizeFeedItems({ ...subscription, feedUrl: '' }, [entry()]), []);
+  assert.deepEqual(normalizeFeedItems(null, [entry()]), []);
+  assert.deepEqual(normalizeFeedItems(subscription, null), []);
+});
+
+test('describes a feed entry as the publisher\'s, and an AI story as an assistant\'s', () => {
+  const [feedStory] = normalizeFeedItems(subscription, [entry()]);
+  const [aiStory] = normalizeStories('fusion', [{ title: 'T', source: 'Example News', url: 'https://example.com/a', summary: 'x' }]);
+  /* Crediting an assistant for a publisher's own syndicated post is the same class of error
+     as passing a model's summary off as the article. */
+  assert.equal(provenanceLabel(feedStory), "From Street Notes's feed");
+  assert.equal(provenanceLabel(aiStory), 'Added by ChatGPT');
+  assert.equal(originBadge(feedStory), 'RSS');
+  assert.equal(originBadge(aiStory), 'AI');
+  assert.equal(provenanceLabel({}), 'Added by an assistant');
+});
+
+test('an AI replace never clears a subscription\'s entries', () => {
+  /* A feed's stories carry the subscription's name as their topic, so a topic that happens to
+     share that name would otherwise let one refresh wipe a shelf the reader subscribed to. */
+  const existing = [
+    { id: 'ai-1', via: 'ai', topic: 'Street Notes', url: 'https://example.com/old' },
+    { id: 'rss-1', via: 'rss', topic: 'Street Notes', url: 'https://streetnotes.example/old' },
+  ];
+  const stale = staleStoriesForReplace(existing, 'Street Notes', new Set());
+  assert.deepEqual(stale.map((story) => story.id), ['ai-1']);
+});
+
+test('drops an AI story a subscription already delivered, keeping one card per link', () => {
+  const shelf = [{ via: 'rss', url: 'https://streetnotes.example/bus-lanes' }];
+  const supplied = normalizeStories('streets', [
+    { title: 'Bus lanes', source: 'Street Notes', url: 'https://streetnotes.example/bus-lanes', summary: 'x' },
+    { title: 'Other', source: 'Elsewhere', url: 'https://elsewhere.example/a', summary: 'x' },
+  ]);
+  const kept = withoutFeedDuplicates(supplied, shelf);
+  assert.deepEqual(kept.map((story) => story.url), ['https://elsewhere.example/a']);
+  /* An AI story already on the shelf as an AI story is a different question, left to replace. */
+  assert.equal(withoutFeedDuplicates(supplied, [{ via: 'ai', url: 'https://streetnotes.example/bus-lanes' }]).length, 2);
+});
+
+test('keeps a subscription made before its feed URL is known, and marks it pending', () => {
+  const pending = normalizeSubscription({ name: 'Street Notes', url: 'https://streetnotes.example/some/article' });
+  assert.equal(pending.host, 'streetnotes.example');
+  assert.equal(pending.feedUrl, '');
+  assert.equal(pending.feedStatus, 'pending', 'the reader has chosen who to follow; the feed can come later');
+
+  const active = normalizeSubscription({ name: 'Street Notes', url: 'https://streetnotes.example', feedUrl: 'https://streetnotes.example/feed.xml' });
+  assert.equal(active.feedStatus, 'active');
+  /* An unsafe feed URL is dropped, not stored: it would be handed to a fetcher. */
+  assert.equal(normalizeSubscription({ name: 'X', url: 'https://x.example', feedUrl: 'javascript:alert(1)' }).feedStatus, 'pending');
+  assert.equal(normalizeSubscription({ name: 'X', url: 'javascript:alert(1)' }), null);
+  assert.equal(normalizeSubscription({ name: 'X', url: 'https://x.example', kind: 'telepathy' }).kind, 'blog');
 });

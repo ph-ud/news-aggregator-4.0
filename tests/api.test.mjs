@@ -286,6 +286,21 @@ test('every view showing agent-written text says where that text came from', asy
   assert.match(code, /required: \['title', 'source', 'url', 'summary'\]/, 'a story with no summary has no readable text at all');
   assert.match(code, /80.150 words/, 'the tool must say how much summary it wants');
 
+  /* Two pipelines now write stories, and a card that cannot say which is which lets a model's
+     summary read as a publisher's own post. The badge comes from `via`, not from each view. */
+  assert.match(code, /function provenanceTag\(record\)/);
+  assert.match(code, /originBadge\(record\)/, 'the tag must show which pipeline delivered the record');
+  assert.match(code, /provenanceLabel\(record\)/, 'and the wording must come from the shared helper');
+  assert.equal(/Added by \$\{addedByLabel\(record\)\}/.test(code), false, 'a feed entry is not "added by" an assistant');
+
+  /* The reader page makes a claim about who wrote the text below it, so it must branch. */
+  assert.match(code, /const fromFeed = isFromFeed\(story\)/, 'readerView must know which pipeline it is rendering');
+  assert.match(code, /class="article-notice article-notice-rss"/, 'a feed entry needs its own notice');
+  assert.match(code, /own feed entry, not a summary of it/, 'and that notice must not call it an assistant\'s summary');
+
+  /* Nothing in the page may fetch a feed: that is the reader's own machine's job. */
+  assert.equal(/fetch\(\s*(?:feed|entry|subscription)/i.test(code), false, 'the page must never fetch a feed itself');
+
   /* The reader page is the one that reads like an article, so it must be explicit. */
   assert.match(code, /class="article-notice"/, 'the reader page must state that the body is a summary');
   assert.match(code, /never fetches or stores article text/);
