@@ -360,13 +360,16 @@ function accountView() {
   <aside class="library-aside"><div class="aside-block aside-note"><span>${icon('lock')}</span><p>The server stores your library as ciphertext it cannot open, and only ever sees a value derived from your passphrase — never the passphrase itself.</p></div></aside></div>`;
 }
 
-function accountChip() { const name = store.profile?.name || 'Reader'; return html`<div class="account-chip"><span class="reader-mark">${initials(name)}</span><button class="account-identity" data-action="open-settings" aria-label="Open settings"><strong>${name}</strong><small>${store.profile?.email || ''}</small></button><button data-action="open-settings" aria-label="Settings">${icon('gear')}</button><button data-action="sign-out" aria-label="Sign out">${icon('logout')}</button></div>`; }
+/* Three children, matching the three grid columns: a fourth wraps onto a row of its own. The
+   settings entry is a nav row above instead, where a settings entry belongs. */
+function accountChip() { const name = store.profile?.name || 'Reader'; return html`<div class="account-chip"><span class="reader-mark">${initials(name)}</span><button class="account-identity" data-action="open-settings" data-section="account" aria-label="Your account"><strong>${name}</strong><small>${store.profile?.email || ''}</small></button><button data-action="sign-out" aria-label="Sign out">${icon('logout')}</button></div>`; }
 function folderRow(folder) { return html`<div class="folder-wrap"><button class="folder ${state.activeFolder === folder.id && state.view === 'library' ? 'active' : ''}" data-action="open-folder" data-folder="${folder.id}">${icon('folder')}<span>${folder.name}</span><b>${folderCount(folder.id)}</b></button><button class="folder-menu" data-action="rename-folder" data-folder="${folder.id}" aria-label="Rename ${folder.name}">${icon('dots')}</button></div>`; }
 function sidebar() { const { stories: feed, saved, folders, notes } = library(); const libraryActive = state.view === 'library'; return html`<aside class="sidebar"><a class="brand" href="#" data-action="open-home"><span>4.0</span><strong>reads</strong></a>
   <nav class="primary-nav" aria-label="Sections"><button class="nav-link ${libraryActive && state.activeFolder === 'all' ? 'active' : ''}" data-action="open-home">${icon('book')}<span>Home</span><b>${feed.length || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'rss' ? 'active' : ''}" data-action="open-subscriptions">${icon('rss')}<span>Subscriptions</span><b>${feedStories().length || ''}</b></button><button class="nav-link ${libraryActive && state.activeFolder === 'ai' ? 'active' : ''}" data-action="open-ai">${icon('sparkle')}<span>AI finds</span><b>${feed.length - feedStories().length || ''}</b></button></nav>
   <div class="library-title"><span>Library</span><button data-action="new-folder" aria-label="Create shelf">${icon('plus')}</button></div>
   <nav class="library" aria-label="Reading shelves"><button class="folder ${libraryActive && state.activeFolder === 'saved' ? 'active' : ''}" data-action="open-saved">${icon('bookmark')}<span>Saved</span><b>${saved.length}</b></button><button class="folder ${libraryActive && state.activeFolder === 'notes' ? 'active' : ''}" data-action="open-notes">${icon('note')}<span>Notes</span><b>${notes.length}</b></button>${folders.map(folderRow)}</nav>
-  <div class="sidebar-spacer"></div>${accountChip()}</aside>`; }
+  <div class="sidebar-spacer"></div>
+  <nav class="sidebar-footer" aria-label="Settings"><button class="folder ${state.settingsOpen ? 'active' : ''}" data-action="open-settings">${icon('gear')}<span>Settings</span></button></nav>${accountChip()}</aside>`; }
 
 /* Records are researched by an assistant and handed to us; nothing here was fetched from a feed.
    Every surface that shows that text shows this, so agent-written prose is never mistaken for the
@@ -877,7 +880,7 @@ document.addEventListener('click', async (event) => {
   if (action === 'finish-recovery') { state.recoveryKey = ''; state.view = 'library'; toast(`Welcome, ${store.profile.name}.`); render(); return; }
   if (action === 'sign-out') { await signOut(); toast('Signed out. Your library stays encrypted on the server.'); return; }
 
-  if (action === 'open-settings') { state.settingsOpen = true; render(); return; }
+  if (action === 'open-settings') { state.settingsOpen = true; if (button.dataset.section) state.settingsSection = button.dataset.section; render(); return; }
   /* Only the backdrop itself closes, never a click that bubbled up from inside the dialog. */
   if (action === 'close-settings' && (event.target === button || button.classList.contains('settings-close'))) { state.settingsOpen = false; render(); return; }
   if (action === 'settings-section') { state.settingsSection = button.dataset.section; render(); return; }
