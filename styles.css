@@ -27,3 +27,11 @@
 .note-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:24px}.note-card{display:flex;flex-direction:column;padding:20px;border:1px solid var(--line);background:var(--card);animation:story-arrival 620ms cubic-bezier(.2,.8,.2,1) both;animation-delay:calc(var(--arrival-index) * 60ms)}.note-card-head{margin-bottom:12px}.note-title{display:block;padding:0;border:0;color:var(--ink);background:transparent;text-align:left;font:500 19px/1.1 Georgia,serif;letter-spacing:-.04em}button.note-title:hover{color:var(--accent)}.note-title-orphan{color:var(--soft)}.note-source{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin:7px 0 0;color:var(--muted);font-size:10px}.note-body{margin:0 0 16px;padding:12px 15px;border-left:2px solid var(--accent);background:var(--paper);font:14px/1.6 Georgia,serif;white-space:pre-wrap}.note-card .card-actions{margin-top:auto}
 @media(max-width:760px){.settings-backdrop{padding:0}.settings-dialog{grid-template-columns:1fr;max-height:100vh;height:100vh}.settings-nav{flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line);padding:14px}.settings-nav .eyebrow{display:none}.settings-tab{width:auto;flex:0 0 auto}.settings-body{padding:22px}.note-grid{grid-template-columns:1fr}}
 .sidebar-footer{display:grid;gap:3px;margin-bottom:4px}.sidebar-footer .folder svg{color:var(--muted)}.sidebar-footer .folder.active svg{color:var(--accent)}
+
+/* Shelf rows sit flush with every other row in the sidebar. The rename button used to hold a
+   26px grid column open, which pushed each shelf's count that far in from the counts on Saved
+   and on the tabs above. It overlays the row instead, and the count yields to it on hover. */
+.folder-wrap{position:relative;display:block;grid-template-columns:none}
+.folder-menu{position:absolute;top:50%;right:6px;width:22px;height:22px;transform:translateY(-50%)}
+.folder-wrap:hover .folder b{opacity:0}
+@media(max-width:760px){.folder-wrap{display:contents;position:static}.folder-menu{display:none}}
